@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="theme-color" content="#8a4b2f" />
+  <title>Cowboy Salgados</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+  <div class="app">
+
+    <header class="topbar">
+      <div class="topbar__brand">🤠 <span id="business-name-header">Cowboy Salgados</span></div>
+      <button id="btn-settings" class="icon-btn" aria-label="Configurações">⚙️</button>
+    </header>
+
+    <main class="views">
+      <section id="view-inicio" class="view"></section>
+      <section id="view-venda" class="view hidden"></section>
+      <section id="view-clientes" class="view hidden"></section>
+      <section id="view-fiado" class="view hidden"></section>
+      <section id="view-estoque" class="view hidden"></section>
+    </main>
+
+    <nav class="bottom-nav">
+      <button class="nav-btn active" data-view="inicio"><span
+          class="nav-btn__icon">🏠</span><span>Início</span></button>
+      <button class="nav-btn" data-view="venda"><span class="nav-btn__icon">🛒</span><span>Venda</span></button>
+      <button class="nav-btn" data-view="clientes"><span class="nav-btn__icon">👥</span><span>Clientes</span></button>
+      <button class="nav-btn" data-view="fiado"><span class="nav-btn__icon">📒</span><span>Fiado</span></button>
+      <button class="nav-btn" data-view="estoque"><span class="nav-btn__icon">📦</span><span>Estoque</span></button>
+    </nav>
+
+    <!-- Overlays em tela cheia -->
+    <div id="overlay-nova-venda" class="overlay hidden"></div>
+    <div id="overlay-cliente-perfil" class="overlay hidden"></div>
+    <div id="overlay-configuracoes" class="overlay hidden"></div>
+    <div id="overlay-relatorio" class="overlay hidden"></div>
+
+    <!-- Modal de confirmação genérico -->
+    <div id="modal-confirm" class="modal hidden">
+      <div class="modal__card">
+        <h3 class="modal__title"></h3>
+        <p class="modal__message"></p>
+        <div class="modal__actions">
+          <button class="btn btn--secondary modal__cancel-btn"></button>
+          <button class="btn btn--primary modal__confirm-btn"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal de formulário genérico -->
+    <div id="modal-prompt" class="modal hidden">
+      <div class="modal__card">
+        <h3 class="modal__title"></h3>
+        <div class="modal__body"></div>
+        <div class="modal__actions">
+          <button class="btn btn--secondary modal__cancel-btn">Cancelar</button>
+          <button class="btn btn--primary modal__confirm-btn">Salvar</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+
+</html>
