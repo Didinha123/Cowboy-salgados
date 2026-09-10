@@ -95,6 +95,47 @@ select {
   justify-content: center;
 }
 
+.topbar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sync-badge {
+  border: none;
+  background: rgba(255, 255, 255, 0.18);
+  color: inherit;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  font-size: 1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: -4px 0 10px;
+  line-height: 1.4;
+}
+
+.fiado-item {
+  flex-wrap: wrap;
+}
+
+.fiado-item__actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.fiado-item__actions .btn {
+  margin: 0;
+}
+
 /* ---------------------------------- Views ---------------------------------- */
 
 .views {
@@ -773,7 +814,6 @@ select {
     transform: translateY(30px);
     opacity: 0;
   }
-
   to {
     transform: translateY(0);
     opacity: 1;
@@ -819,7 +859,6 @@ select {
 }
 
 @media (max-width: 360px) {
-
   .dash-grid,
   .stat-row {
     gap: 8px;
