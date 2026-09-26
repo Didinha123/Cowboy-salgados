@@ -62,11 +62,16 @@ function generateId(prefix) {
    ========================================================================== */
 
 const API_URL_STORAGE_KEY = "cowboySalgadosApiUrl";
+// Planilha compartilhada padrão: assim qualquer aparelho novo já abre
+// conectado nela, sem precisar colar a URL manualmente nas Configurações.
+const DEFAULT_API_URL =
+  "https://script.google.com/macros/s/AKfycbw_tYziw-ZcaNAW2Ue5pn26ulL-lNvCo1H9COGk_Lvaf_-eucP-F56rs3tC9AxpjUG1ow/exec";
 let apiUrl = "";
 let lastSyncAt = null;
 
 function loadApiUrl() {
-  apiUrl = localStorage.getItem(API_URL_STORAGE_KEY) || "";
+  const saved = localStorage.getItem(API_URL_STORAGE_KEY);
+  apiUrl = saved !== null ? saved : DEFAULT_API_URL;
 }
 
 function saveApiUrl(url) {
@@ -148,6 +153,20 @@ async function syncFromRemote({ silent = false } = {}) {
     setSyncStatus("offline");
     if (!silent) showToast("Não foi possível conectar à planilha. Mostrando dados salvos neste aparelho.");
   }
+}
+
+// Envia de uma vez todo o histórico deste aparelho para a planilha (usado na
+// primeira conexão, quando a planilha está vazia). Substitui o conteúdo dela.
+async function enviarTudoParaPlanilha() {
+  if (!apiUrl) return;
+  await apiPost("importarTudo", {
+    clientes: db.clientes,
+    vendas: db.vendas,
+    itensVenda: db.itensVenda,
+    pagamentos: db.pagamentos,
+    estoque: db.estoque,
+    configuracoes: db.configuracoes,
+  });
 }
 
 /* ==========================================================================
@@ -1847,8 +1866,14 @@ function renderConfiguracoes() {
         <label>URL da planilha (Apps Script)</label>
         <input id="cfg-api-url" type="url" placeholder="https://script.google.com/macros/s/.../exec" value="${apiUrl}" />
       </div>
-      <button class="btn btn--secondary btn--block" id="cfg-api-salvar-btn">Salvar e conectar</button>
-      ${apiUrl ? `<button class="btn btn--secondary btn--block" id="cfg-api-sync-btn">🔄 Sincronizar agora</button>` : ""}
+      <button class="btn btn--secondary btn--block" id="cfg-api-salvar-btn">Salvar URL</button>
+      ${
+        apiUrl
+          ? `<p class="field-hint">Na primeira conexão, envie os dados deste aparelho para a planilha (ela começa vazia). Depois disso, use "Sincronizar" para trazer o que estiver na planilha.</p>
+             <button class="btn btn--secondary btn--block" id="cfg-api-enviar-btn">📤 Enviar dados deste aparelho para a planilha</button>
+             <button class="btn btn--secondary btn--block" id="cfg-api-sync-btn">🔄 Sincronizar a partir da planilha</button>`
+          : ""
+      }
 
       <h4 class="section-subtitle">Segurança dos dados</h4>
       <button class="btn btn--secondary btn--block" id="cfg-exportar-btn">📤 Exportar dados</button>
@@ -1877,16 +1902,51 @@ function renderConfiguracoes() {
     const url = document.getElementById("cfg-api-url").value.trim();
     saveApiUrl(url);
     if (url) {
-      showToast("Conectando à planilha...");
-      syncFromRemote();
+      setSyncStatus("offline");
+      showToast("URL salva! Agora envie os dados deste aparelho ou sincronize a partir da planilha.");
     } else {
       setSyncStatus("offline");
       showToast("Planilha desconectada. Usando apenas os dados deste aparelho.");
     }
     renderConfiguracoes();
   });
+
+  const enviarBtn = document.getElementById("cfg-api-enviar-btn");
+  if (enviarBtn) {
+    enviarBtn.addEventListener("click", () => {
+      openConfirm({
+        title: "📤 Enviar dados para a planilha",
+        message: "Isso substitui todo o conteúdo da planilha pelos dados que estão salvos neste aparelho. Use isso na primeira conexão. Deseja continuar?",
+        confirmText: "Enviar",
+        danger: true,
+        onConfirm: async () => {
+          setSyncStatus("syncing");
+          try {
+            await enviarTudoParaPlanilha();
+            setSyncStatus("online");
+            showToast("Dados enviados para a planilha!");
+          } catch (err) {
+            console.error("Erro ao enviar dados:", err);
+            setSyncStatus("offline");
+            showToast("Não foi possível enviar os dados para a planilha.");
+          }
+        },
+      });
+    });
+  }
+
   const syncBtn = document.getElementById("cfg-api-sync-btn");
-  if (syncBtn) syncBtn.addEventListener("click", () => syncFromRemote());
+  if (syncBtn) {
+    syncBtn.addEventListener("click", () => {
+      openConfirm({
+        title: "🔄 Sincronizar a partir da planilha",
+        message: "Isso substitui os dados deste aparelho pelos dados atuais da planilha. Deseja continuar?",
+        confirmText: "Sincronizar",
+        danger: true,
+        onConfirm: () => syncFromRemote(),
+      });
+    });
+  }
 
   document.getElementById("cfg-exportar-btn").addEventListener("click", exportarDados);
   document.getElementById("cfg-importar-input").addEventListener("change", (e) => {
@@ -2235,9 +2295,12 @@ function initEventListeners() {
     renderConfiguracoes();
     openOverlay("overlay-configuracoes");
   });
-  document.getElementById("sync-badge").addEventListener("click", () => {
-    if (apiUrl) syncFromRemote();
-  });
+  const syncBadge = document.getElementById("sync-badge");
+  if (syncBadge) {
+    syncBadge.addEventListener("click", () => {
+      if (apiUrl) syncFromRemote();
+    });
+  }
 }
 
 function init() {
