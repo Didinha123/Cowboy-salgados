@@ -144,12 +144,14 @@ async function syncFromRemote({ silent = false } = {}) {
   try {
     const remote = await apiFetchAll();
     // A planilha é uma fonte externa (pode estar mal configurada ou com o
-    // Apps Script desatualizado) — só aceita o pacote se vier completo, pra
-    // nunca substituir os dados locais por algo corrompido/pela metade.
-    if (!remote || !remote.configuracoes) {
-      throw new Error("Resposta da planilha veio incompleta (faltou 'configuracoes').");
+    // Apps Script desatualizado) — só aceita o pacote se vier com o mínimo
+    // necessário pro app funcionar. "configuracoes" às vezes não vem (bug
+    // no Apps Script publicado) — nesse caso usa os padrões locais em vez
+    // de rejeitar os dados reais (clientes/vendas) que vieram certinhos.
+    if (!remote || !remote.clientes || !remote.vendas || !remote.produtos || !remote.estoque) {
+      throw new Error("Resposta da planilha veio incompleta.");
     }
-    db = remote;
+    db = { ...remote, configuracoes: remote.configuracoes || { ...DEFAULT_CONFIGURACOES } };
     saveDB();
     setSyncStatus("online");
     renderView(ui.viewAtual);
@@ -638,13 +640,23 @@ function editarCliente(clienteId, { nome, telefone, observacao }) {
   syncInBackground("upsert", { sheet: "Clientes", row: cliente });
 }
 
+// Remove o cadastro do cliente. O histórico de vendas/pagamentos dele
+// continua existindo (só o cliente some da lista e dos relatórios de nome).
+function excluirCliente(clienteId) {
+  db.clientes = db.clientes.filter((c) => c.id !== clienteId);
+  saveDB();
+  syncInBackground("deletar", { sheet: "Clientes", id: clienteId });
+}
+
 // Registra uma venda completa: cria a venda, os itens, abate o estoque
 // e (se fiado) já deixa o saldo devedor do cliente atualizado.
-function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagamento }) {
+function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagamento, desconto = 0 }) {
   const vendaId = generateId("venda");
   const data = new Date().toISOString(); // registra automaticamente data e hora da venda
 
   let valorTotal = 0;
+  // Os itens guardam sempre o valor de tabela (cadastrado) — o desconto
+  // só é aplicado no total da venda, não item a item.
   const itensRegistrados = itens.map((item) => {
     const produto = getProduto(item.produtoId);
     const valorItem = calcularValorItem(produto, item.quantidade);
@@ -652,7 +664,7 @@ function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagament
     return { id: generateId("item"), vendaId, produtoId: item.produtoId, quantidade: item.quantidade, valorTotal: valorItem };
   });
 
-  valorTotal = Math.round(valorTotal * 100) / 100;
+  valorTotal = Math.max(0, Math.round((valorTotal - (desconto || 0)) * 100) / 100);
   const isFiado = formaPagamento === "fiado";
 
   const venda = {
@@ -911,6 +923,7 @@ const ui = {
     metodoVista: null,
     buscaCliente: "",
     dataPrevisaoPagamento: null,
+    desconto: 0,
   },
   clientes: { busca: "" },
   venda: { clienteFiltro: "" },
@@ -935,6 +948,7 @@ function resetNovaVendaState() {
     metodoVista: null,
     buscaCliente: "",
     dataPrevisaoPagamento: null,
+    desconto: 0,
   };
 }
 
@@ -1343,7 +1357,14 @@ function renderPerfilCliente() {
     <div class="overlay__header">
       <button class="icon-btn" data-action="fechar-perfil">←</button>
       <h2>Perfil do cliente</h2>
-      ${cliente.fixo ? "" : `<button class="icon-btn" data-action="editar-cliente">✏️</button>`}
+      ${
+        cliente.fixo
+          ? ""
+          : `<div class="overlay__header-actions">
+               <button class="icon-btn" data-action="editar-cliente">✏️</button>
+               <button class="icon-btn" data-action="excluir-cliente">🗑️</button>
+             </div>`
+      }
     </div>
     <div class="overlay__body">
       <div class="panel profile-card">
@@ -1360,6 +1381,7 @@ function renderPerfilCliente() {
       </div>
 
       <div class="profile-actions">
+        <button class="btn btn--secondary btn--block" data-action="nova-venda-cliente">🛒 Nova venda pra este cliente</button>
         <button class="btn btn--primary btn--block" data-action="registrar-pagamento" ${saldo <= 0 ? "disabled" : ""}>💰 Registrar pagamento</button>
         <button class="btn btn--whatsapp btn--block" data-action="cobrar-whatsapp" ${!cliente.telefone ? "disabled" : ""}>📱 Cobrar pelo WhatsApp</button>
       </div>
@@ -1419,6 +1441,12 @@ function renderPerfilCliente() {
   });
   const editBtn = el.querySelector('[data-action="editar-cliente"]');
   if (editBtn) editBtn.addEventListener("click", () => abrirFormEditarCliente(cliente));
+  const delBtn = el.querySelector('[data-action="excluir-cliente"]');
+  if (delBtn) delBtn.addEventListener("click", () => confirmarExcluirCliente(cliente));
+  el.querySelector('[data-action="nova-venda-cliente"]').addEventListener("click", () => {
+    closeOverlay("overlay-cliente-perfil");
+    startNovaVendaParaCliente(cliente.id);
+  });
   el.querySelector('[data-action="registrar-pagamento"]').addEventListener("click", () => abrirFormPagamento(cliente));
   el.querySelector('[data-action="cobrar-whatsapp"]').addEventListener("click", () => cobrarPeloWhatsApp(cliente));
   el.querySelectorAll("[data-venda-id]").forEach((item) => {
@@ -1443,6 +1471,25 @@ function abrirFormEditarCliente(cliente) {
       editarCliente(cliente.id, values);
       showToast("Cliente atualizado!");
       renderPerfilCliente();
+    },
+  });
+}
+
+function confirmarExcluirCliente(cliente) {
+  const saldo = calcularSaldoCliente(cliente.id);
+  openConfirm({
+    title: "🗑️ Excluir cliente",
+    message:
+      saldo > 0
+        ? `${cliente.nome} ainda tem ${formatCurrency(saldo)} em aberto. O histórico de vendas não é apagado, mas o cliente some da lista e das cobranças. Deseja continuar?`
+        : `Tem certeza que deseja excluir ${cliente.nome}? Essa ação não pode ser desfeita.`,
+    confirmText: "Excluir",
+    danger: true,
+    onConfirm: () => {
+      excluirCliente(cliente.id);
+      showToast("Cliente excluído.");
+      closeOverlay("overlay-cliente-perfil");
+      renderView(ui.viewAtual);
     },
   });
 }
@@ -2137,6 +2184,16 @@ function startNovaVenda() {
   openOverlay("overlay-nova-venda");
 }
 
+// Atalho usado no perfil do cliente: pula a busca (passo 1) porque o
+// cliente já está selecionado, indo direto pra escolha de produtos.
+function startNovaVendaParaCliente(clienteId) {
+  resetNovaVendaState();
+  ui.novaVenda.clienteId = clienteId;
+  ui.novaVenda.step = 2;
+  renderNovaVenda();
+  openOverlay("overlay-nova-venda");
+}
+
 function fecharNovaVenda() {
   closeOverlay("overlay-nova-venda");
   renderView(ui.viewAtual);
@@ -2304,6 +2361,8 @@ function renderPassoPagamento() {
   }
 
   const podeConfirmar = forma === "fiado" || (forma === "vista" && metodo);
+  const desconto = Math.min(total, Math.max(0, ui.novaVenda.desconto || 0));
+  const totalComDesconto = Math.round((total - desconto) * 100) / 100;
 
   el.innerHTML = `
     ${stepHeader("Forma de pagamento", true)}
@@ -2312,7 +2371,11 @@ function renderPassoPagamento() {
       <ul class="cart-list">
         ${itens.map((i) => `<li class="cart-item"><span>${i.produto.nome} x ${i.quantidade}</span><strong>${formatCurrency(i.valorTotal)}</strong></li>`).join("")}
       </ul>
-      <div class="cart-total"><span>Total</span><strong>${formatCurrency(total)}</strong></div>
+      <div class="form-field">
+        <label for="venda-desconto">Desconto (R$, opcional)</label>
+        <input type="number" id="venda-desconto" inputmode="decimal" step="0.01" min="0" max="${total}" placeholder="0,00" value="${ui.novaVenda.desconto || ""}" />
+      </div>
+      <div class="cart-total"><span>Total</span><strong id="venda-total-valor">${formatCurrency(totalComDesconto)}</strong></div>
 
       <div class="payment-options">
         <button class="btn ${forma === "vista" ? "btn--primary" : "btn--secondary"} btn--block btn--xl" data-action="forma-vista">À VISTA</button>
@@ -2370,6 +2433,14 @@ function renderPassoPagamento() {
       ui.novaVenda.dataPrevisaoPagamento = e.target.value;
     });
   }
+  const descontoInput = document.getElementById("venda-desconto");
+  if (descontoInput) {
+    descontoInput.addEventListener("input", (e) => {
+      const valor = Math.min(total, Math.max(0, parseFloat(e.target.value.replace(",", ".")) || 0));
+      ui.novaVenda.desconto = valor;
+      document.getElementById("venda-total-valor").textContent = formatCurrency(Math.round((total - valor) * 100) / 100);
+    });
+  }
   const confirmarBtn = document.getElementById("venda-confirmar-btn");
   if (confirmarBtn) {
     confirmarBtn.addEventListener("click", confirmarNovaVenda);
@@ -2381,15 +2452,17 @@ function confirmarNovaVenda() {
   if (total <= 0) return;
 
   const formaPagamentoFinal = ui.novaVenda.formaPagamento === "fiado" ? "fiado" : ui.novaVenda.metodoVista;
+  const desconto = Math.min(total, Math.max(0, ui.novaVenda.desconto || 0));
 
   registrarVenda({
     clienteId: ui.novaVenda.clienteId,
     itens: itens.map((i) => ({ produtoId: i.produtoId, quantidade: i.quantidade })),
     formaPagamento: formaPagamentoFinal,
     dataPrevisaoPagamento: ui.novaVenda.formaPagamento === "fiado" ? ui.novaVenda.dataPrevisaoPagamento : null,
+    desconto,
   });
 
-  showToast(`Venda de ${formatCurrency(total)} registrada!`);
+  showToast(`Venda de ${formatCurrency(total - desconto)} registrada!`);
   fecharNovaVenda();
   switchView("venda");
 }
