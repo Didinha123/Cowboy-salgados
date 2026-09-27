@@ -65,7 +65,7 @@ const API_URL_STORAGE_KEY = "cowboySalgadosApiUrl";
 // Planilha compartilhada padrão: assim qualquer aparelho novo já abre
 // conectado nela, sem precisar colar a URL manualmente nas Configurações.
 const DEFAULT_API_URL =
-  "https://script.google.com/macros/s/AKfycby7gdpXO1dJdiTK4Buyv9XDROx1NJOVB9qyQrUd_TAFgK883Qr9MVg79Nq3fxcbIG7Ehw/exec";
+  "https://script.google.com/macros/s/AKfycbw_tYziw-ZcaNAW2Ue5pn26ulL-lNvCo1H9COGk_Lvaf_-eucP-F56rs3tC9AxpjUG1ow/exec";
 let apiUrl = "";
 let lastSyncAt = null;
 
@@ -1754,12 +1754,18 @@ function renderFiado() {
                 const metaPartes = [`Venda: ${formatDateShort(v.data)}`];
                 if (v.dataPrevisaoPagamento) metaPartes.push(`Previsto: ${formatDateOnly(v.dataPrevisaoPagamento)}`);
                 if (v.dataPagamento) metaPartes.push(`Pago em: ${formatDateShort(v.dataPagamento)}`);
-                if (v.status === "parcial") metaPartes.push(`já pago ${formatCurrency(v.valorPago)}`);
+                let infoPagamento = "";
+                if (v.status === "pago") {
+                  infoPagamento = `<span class="fiado-item__pagamento fiado-item__pagamento--completo">✅ Pago integral: ${formatCurrency(v.valorPago)}</span>`;
+                } else if (v.status === "parcial") {
+                  infoPagamento = `<span class="fiado-item__pagamento fiado-item__pagamento--parcial">💰 Pago ${formatCurrency(v.valorPago)} de ${formatCurrency(v.valorTotal)} — falta ${formatCurrency(v.valorRestante)}</span>`;
+                }
                 return `
                 <li class="list-item fiado-item" data-venda-id="${v.id}">
                   <div class="list-item__main" data-action="abrir-cliente">
                     <strong>${cliente ? cliente.nome : "Cliente"}</strong>
                     <span class="list-item__meta">${metaPartes.join(" · ")}</span>
+                    ${infoPagamento}
                   </div>
                   <div class="list-item__side">
                     <span class="list-item__value">${formatCurrency(v.valorTotal)}</span>
