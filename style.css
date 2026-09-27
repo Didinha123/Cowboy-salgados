@@ -316,6 +316,13 @@ select {
   color: var(--warning);
 }
 
+.alert-panel--danger {
+  background: var(--danger-bg);
+  border: 1.5px solid var(--danger);
+  color: var(--danger);
+  cursor: pointer;
+}
+
 .alert-list {
   margin: 8px 0 0;
   padding-left: 18px;
