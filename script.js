@@ -65,7 +65,7 @@ const API_URL_STORAGE_KEY = "cowboySalgadosApiUrl";
 // Planilha compartilhada padrão: assim qualquer aparelho novo já abre
 // conectado nela, sem precisar colar a URL manualmente nas Configurações.
 const DEFAULT_API_URL =
-  "https://script.google.com/macros/s/AKfycbw_tYziw-ZcaNAW2Ue5pn26ulL-lNvCo1H9COGk_Lvaf_-eucP-F56rs3tC9AxpjUG1ow/exec";
+  "https://script.google.com/macros/s/AKfycby7gdpXO1dJdiTK4Buyv9XDROx1NJOVB9qyQrUd_TAFgK883Qr9MVg79Nq3fxcbIG7Ehw/exec";
 let apiUrl = "";
 let lastSyncAt = null;
 
