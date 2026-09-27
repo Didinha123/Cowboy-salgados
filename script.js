@@ -1768,7 +1768,8 @@ function renderFiado() {
                     ${infoPagamento}
                   </div>
                   <div class="list-item__side">
-                    <span class="list-item__value">${formatCurrency(v.valorTotal)}</span>
+                    ${pendente ? `<span class="list-item__value-label">Falta pagar</span>` : ""}
+                    <span class="list-item__value">${formatCurrency(pendente ? v.valorRestante : v.valorTotal)}</span>
                     <span class="badge">${badge.emoji} ${badge.label}</span>
                     ${atrasada ? `<span class="badge badge--danger">⏰ Atrasado</span>` : ""}
                     ${
