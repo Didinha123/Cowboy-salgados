@@ -654,10 +654,14 @@ function excluirCliente(clienteId) {
   db.clientes = db.clientes.filter((c) => c.id !== clienteId);
   saveDB();
 
-  itensDoCliente.forEach((i) => syncInBackground("deletar", { sheet: "ItensVenda", id: i.id }));
-  vendasDoCliente.forEach((v) => syncInBackground("deletar", { sheet: "Vendas", id: v.id }));
-  pagamentosDoCliente.forEach((p) => syncInBackground("deletar", { sheet: "Pagamentos", id: p.id }));
-  syncInBackground("deletar", { sheet: "Clientes", id: clienteId });
+  // Um único pedido (em vez de vários em paralelo) — o Apps Script não
+  // garante ordem/atomicidade entre chamadas concorrentes na mesma aba.
+  syncInBackground("excluirCliente", {
+    clienteId,
+    itemIds: itensDoCliente.map((i) => i.id),
+    vendaIds: vendasDoCliente.map((v) => v.id),
+    pagamentoIds: pagamentosDoCliente.map((p) => p.id),
+  });
 }
 
 // Registra uma venda completa: cria a venda, os itens, abate o estoque
@@ -821,9 +825,14 @@ function excluirVenda(vendaId) {
   db.vendas = db.vendas.filter((v) => v.id !== vendaId);
   saveDB();
 
-  itens.forEach((i) => syncInBackground("deletar", { sheet: "ItensVenda", id: i.id }));
-  syncInBackground("deletar", { sheet: "Vendas", id: vendaId });
-  estoquesAfetados.forEach((registro) => syncInBackground("upsert", { sheet: "Estoque", row: registro }));
+  // Um único pedido (em vez de vários em paralelo) — o Apps Script não
+  // garante ordem/atomicidade entre chamadas concorrentes na mesma aba, o
+  // que podia deixar itens ou a venda sem excluir na planilha.
+  syncInBackground("excluirVenda", {
+    vendaId,
+    itemIds: itens.map((i) => i.id),
+    estoque: estoquesAfetados,
+  });
 }
 
 function ajustarEstoque(produtoId, tipoOperacao, quantidade) {
