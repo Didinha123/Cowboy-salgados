@@ -404,6 +404,13 @@ select {
   font-weight: 700;
 }
 
+.list-item__value-label {
+  font-size: 0.7rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
 .list-item__value-row {
   display: flex;
   align-items: center;
