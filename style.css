@@ -377,6 +377,27 @@ select {
   font-weight: 700;
 }
 
+.list-item__value-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.list-item__edit-btn {
+  border: none;
+  background: var(--bg);
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  font-size: 0.8rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
 .badge {
   font-size: 0.72rem;
   font-weight: 700;
