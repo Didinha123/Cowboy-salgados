@@ -143,6 +143,12 @@ async function syncFromRemote({ silent = false } = {}) {
   setSyncStatus("syncing");
   try {
     const remote = await apiFetchAll();
+    // A planilha é uma fonte externa (pode estar mal configurada ou com o
+    // Apps Script desatualizado) — só aceita o pacote se vier completo, pra
+    // nunca substituir os dados locais por algo corrompido/pela metade.
+    if (!remote || !remote.configuracoes) {
+      throw new Error("Resposta da planilha veio incompleta (faltou 'configuracoes').");
+    }
     db = remote;
     saveDB();
     setSyncStatus("online");
@@ -173,6 +179,16 @@ async function enviarTudoParaPlanilha() {
    3. DADOS INICIAIS (SEED) — criados apenas na primeira execução
    ========================================================================== */
 
+const DEFAULT_CONFIGURACOES = {
+  nomeNegocio: "Cowboy Salgados",
+  precoSalgado: 9.9,
+  precoRefrigerante: 4.5,
+  precoTrufa: 7.5,
+  precoKit4Trufas: 24.0,
+  metaDiaria: 80,
+  estoqueMinimoSalgado: 20,
+};
+
 function buildSeedDB() {
   const now = new Date();
   const isoDaysAgo = (days, hours = 10) => {
@@ -182,15 +198,7 @@ function buildSeedDB() {
     return d.toISOString();
   };
 
-  const configuracoes = {
-    nomeNegocio: "Cowboy Salgados",
-    precoSalgado: 9.9,
-    precoRefrigerante: 4.5,
-    precoTrufa: 7.5,
-    precoKit4Trufas: 24.0,
-    metaDiaria: 80,
-    estoqueMinimoSalgado: 20,
-  };
+  const configuracoes = { ...DEFAULT_CONFIGURACOES };
 
   const produtos = [
     { id: PRODUTO_IDS.SALGADO, nome: "Salgado", tipo: "salgado", unidade: "un", icon: "🥟" },
@@ -382,6 +390,12 @@ function initDB() {
   if (!db) {
     db = buildSeedDB();
     saveDB();
+  } else if (!db.configuracoes) {
+    // Autorreparo: uma sincronização antiga com a planilha (antes do fix do
+    // Apps Script) pode ter salvo o banco local sem "configuracoes". Sem
+    // isso o painel Início quebra pra sempre — repõe os padrões pra destravar.
+    db.configuracoes = { ...DEFAULT_CONFIGURACOES };
+    saveDB();
   }
 }
 
@@ -424,7 +438,9 @@ function toDateKey(dateLike) {
 }
 
 function onlyDigits(str) {
-  return (str || "").replace(/\D/g, "");
+  // O telefone pode vir como número (não texto) quando o cliente é digitado
+  // direto na planilha do Google — por isso força a conversão pra string.
+  return String(str || "").replace(/\D/g, "");
 }
 
 function formatPhone(str) {
@@ -588,6 +604,12 @@ function getFiadoEmAbertoTotal() {
   return db.vendas.filter((v) => v.formaPagamento === "fiado").reduce((sum, v) => sum + v.valorRestante, 0);
 }
 
+// Vendas fiado pendentes cuja data prevista de pagamento já passou (ou nunca
+// foi definida) — usado pro alerta gritante do painel Início.
+function getVendasFiadoAtrasadas() {
+  return db.vendas.filter((v) => v.formaPagamento === "fiado" && v.status !== "pago" && isVendaAtrasada(v));
+}
+
 /* ==========================================================================
    6. OPERAÇÕES DE DADOS (escrita)
    ========================================================================== */
@@ -733,6 +755,24 @@ function editarPrevisaoPagamento(vendaId, novaData) {
   const venda = db.vendas.find((v) => v.id === vendaId);
   if (!venda) return;
   venda.dataPrevisaoPagamento = novaData || null;
+  saveDB();
+  syncInBackground("upsert", { sheet: "Vendas", row: venda });
+}
+
+// Corrige o valor total de uma venda já registrada (ex.: erro de digitação
+// no momento da venda). Recalcula o que falta pagar mantendo o valor já
+// pago intacto; à vista sempre fica com a venda 100% paga no novo valor.
+function editarValorTotalVenda(vendaId, novoValorTotal) {
+  const venda = db.vendas.find((v) => v.id === vendaId);
+  if (!venda) return;
+  venda.valorTotal = Math.round(novoValorTotal * 100) / 100;
+  if (venda.formaPagamento === "fiado") {
+    venda.valorRestante = Math.max(0, Math.round((venda.valorTotal - venda.valorPago) * 100) / 100);
+    venda.status = venda.valorRestante <= 0 ? "pago" : venda.valorPago > 0 ? "parcial" : "aberto";
+  } else {
+    venda.valorPago = venda.valorTotal;
+    venda.valorRestante = 0;
+  }
   saveDB();
   syncInBackground("upsert", { sheet: "Vendas", row: venda });
 }
@@ -1025,6 +1065,7 @@ function renderDashboard() {
   const fiadoAberto = getFiadoEmAbertoTotal();
   const recebimentosHoje = getRecebimentosDoDia();
   const alertas = getAlertasEstoque();
+  const fiadoAtrasado = getVendasFiadoAtrasadas();
 
   const el = document.getElementById("view-inicio");
 
@@ -1073,6 +1114,23 @@ function renderDashboard() {
     </div>
 
     ${
+      fiadoAtrasado.length > 0
+        ? `<div class="panel alert-panel alert-panel--danger" id="dash-alerta-fiado">
+            <strong>🚨 FIADO ATRASADO — ${fiadoAtrasado.length} venda${fiadoAtrasado.length > 1 ? "s" : ""}</strong>
+            <ul class="alert-list">
+              ${fiadoAtrasado
+                .map((v) => {
+                  const cliente = getCliente(v.clienteId);
+                  const prazo = v.dataPrevisaoPagamento ? `venceu em ${formatDateOnly(v.dataPrevisaoPagamento)}` : "sem data prevista";
+                  return `<li>${cliente ? cliente.nome : "Cliente"} — ${formatCurrency(v.valorRestante)} (${prazo})</li>`;
+                })
+                .join("")}
+            </ul>
+          </div>`
+        : ""
+    }
+
+    ${
       alertas.length > 0
         ? `<div class="panel alert-panel">
             <strong>⚠️ ESTOQUE BAIXO</strong>
@@ -1087,6 +1145,7 @@ function renderDashboard() {
   `;
 
   document.getElementById("dash-nova-venda-btn").addEventListener("click", startNovaVenda);
+  document.getElementById("dash-alerta-fiado")?.addEventListener("click", () => switchView("fiado"));
 }
 
 /* ==========================================================================
@@ -1125,7 +1184,9 @@ function renderVendaView() {
                 const cliente = getCliente(v.clienteId);
                 const badge = getStatusPagamento(v);
                 const itens = getItensDeVenda(v.id);
-                const resumoItens = itens.map((i) => `${getProduto(i.produtoId).nome} x${i.quantidade}`).join(", ");
+                const resumoItens = itens
+                  .map((i) => `${getProduto(i.produtoId).nome} x${i.quantidade} (${formatCurrency(i.valorTotal)})`)
+                  .join(", ");
                 return `
                 <li class="list-item">
                   <div class="list-item__main">
@@ -1133,7 +1194,10 @@ function renderVendaView() {
                     <span class="list-item__meta">${resumoItens}</span>
                   </div>
                   <div class="list-item__side">
-                    <span class="list-item__value">${formatCurrency(v.valorTotal)}</span>
+                    <div class="list-item__value-row">
+                      <span class="list-item__value">${formatCurrency(v.valorTotal)}</span>
+                      <button class="list-item__edit-btn" data-action="editar-valor-venda" data-venda-id="${v.id}" aria-label="Editar valor total">✏️</button>
+                    </div>
                     <span class="badge">${badge.emoji} ${badge.label}</span>
                   </div>
                 </li>`;
@@ -1151,6 +1215,33 @@ function renderVendaView() {
   document.getElementById("venda-filtro-cliente").addEventListener("change", (e) => {
     ui.venda.clienteFiltro = e.target.value;
     renderVendaView();
+  });
+  el.querySelectorAll('[data-action="editar-valor-venda"]').forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      abrirEditarValorVenda(btn.dataset.vendaId);
+    });
+  });
+}
+
+function abrirEditarValorVenda(vendaId) {
+  const venda = db.vendas.find((v) => v.id === vendaId);
+  if (!venda) return;
+  openPrompt({
+    title: "✏️ Editar valor total da venda",
+    fields: [
+      { id: "valor", label: "Novo valor total", type: "number", inputmode: "decimal", step: "0.01", value: venda.valorTotal },
+    ],
+    confirmText: "Salvar",
+    onSubmit: (values) => {
+      if (values.valor <= 0) {
+        showToast("Informe um valor válido.");
+        return;
+      }
+      editarValorTotalVenda(vendaId, values.valor);
+      showToast("Valor da venda atualizado!");
+      renderView(ui.viewAtual);
+    },
   });
 }
 
@@ -1286,7 +1377,8 @@ function renderPerfilCliente() {
                   if (v.formaPagamento === "fiado" && v.dataPrevisaoPagamento) extras.push(`Previsto: ${formatDateOnly(v.dataPrevisaoPagamento)}`);
                   if (v.dataPagamento) extras.push(`Pago em: ${formatDateShort(v.dataPagamento)}`);
                   const atrasada = isVendaAtrasada(v);
-                  return `<li class="list-item">
+                  const pendente = v.formaPagamento === "fiado" && v.status !== "pago";
+                  return `<li class="list-item" data-venda-id="${v.id}">
                     <div class="list-item__main">
                       <strong>${formatDateTime(v.data)}</strong>
                       <span class="list-item__meta">${itens}${extras.length ? " · " + extras.join(" · ") : ""}</span>
@@ -1295,6 +1387,7 @@ function renderPerfilCliente() {
                       <span class="list-item__value">${formatCurrency(v.valorTotal)}</span>
                       <span class="badge">${badge.emoji} ${badge.label}</span>
                       ${atrasada ? `<span class="badge badge--danger">⏰ Atrasado</span>` : ""}
+                      ${pendente ? `<button class="list-item__edit-btn" data-action="editar-previsao-perfil" aria-label="Nova data prevista">📅</button>` : ""}
                     </div>
                   </li>`;
                 })
@@ -1328,6 +1421,13 @@ function renderPerfilCliente() {
   if (editBtn) editBtn.addEventListener("click", () => abrirFormEditarCliente(cliente));
   el.querySelector('[data-action="registrar-pagamento"]').addEventListener("click", () => abrirFormPagamento(cliente));
   el.querySelector('[data-action="cobrar-whatsapp"]').addEventListener("click", () => cobrarPeloWhatsApp(cliente));
+  el.querySelectorAll("[data-venda-id]").forEach((item) => {
+    item.querySelector('[data-action="editar-previsao-perfil"]')?.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const venda = db.vendas.find((v) => v.id === item.dataset.vendaId);
+      if (venda) abrirFormPrevisao(venda, renderPerfilCliente);
+    });
+  });
 }
 
 function abrirFormEditarCliente(cliente) {
@@ -1609,7 +1709,7 @@ function abrirFormMarcarPago(venda) {
   });
 }
 
-function abrirFormPrevisao(venda) {
+function abrirFormPrevisao(venda, onSaved = renderFiado) {
   openPrompt({
     title: "Data prevista de pagamento",
     fields: [{ id: "data", label: "Nova data prevista", type: "date", value: venda.dataPrevisaoPagamento || toDateKey(new Date()) }],
@@ -1617,7 +1717,7 @@ function abrirFormPrevisao(venda) {
     onSubmit: (values) => {
       editarPrevisaoPagamento(venda.id, values.data);
       showToast("Data prevista atualizada!");
-      renderFiado();
+      onSaved();
     },
   });
 }
@@ -2188,6 +2288,13 @@ function renderPassoProdutos() {
 function renderPassoPagamento() {
   const el = document.getElementById("overlay-nova-venda");
   const cliente = getCliente(ui.novaVenda.clienteId);
+  const isAvulso = cliente.id === CLIENTE_AVULSO_ID;
+  // Cliente Avulso é venda de balcão sem cadastro — não tem como cobrar
+  // depois, então fiado nunca é uma opção válida pra ele.
+  if (isAvulso && ui.novaVenda.formaPagamento === "fiado") {
+    ui.novaVenda.formaPagamento = null;
+    ui.novaVenda.metodoVista = null;
+  }
   const { itens, total } = calcularCarrinho();
   const forma = ui.novaVenda.formaPagamento;
   const metodo = ui.novaVenda.metodoVista;
@@ -2209,7 +2316,11 @@ function renderPassoPagamento() {
 
       <div class="payment-options">
         <button class="btn ${forma === "vista" ? "btn--primary" : "btn--secondary"} btn--block btn--xl" data-action="forma-vista">À VISTA</button>
-        <button class="btn ${forma === "fiado" ? "btn--primary" : "btn--secondary"} btn--block btn--xl" data-action="forma-fiado">PAGAR DEPOIS (FIADO)</button>
+        ${
+          isAvulso
+            ? ""
+            : `<button class="btn ${forma === "fiado" ? "btn--primary" : "btn--secondary"} btn--block btn--xl" data-action="forma-fiado">PAGAR DEPOIS (FIADO)</button>`
+        }
       </div>
 
       ${
@@ -2242,7 +2353,7 @@ function renderPassoPagamento() {
     ui.novaVenda.formaPagamento = "vista";
     renderPassoPagamento();
   });
-  el.querySelector('[data-action="forma-fiado"]').addEventListener("click", () => {
+  el.querySelector('[data-action="forma-fiado"]')?.addEventListener("click", () => {
     ui.novaVenda.formaPagamento = "fiado";
     ui.novaVenda.metodoVista = null;
     renderPassoPagamento();
