@@ -801,6 +801,31 @@ function editarValorTotalVenda(vendaId, novoValorTotal) {
   syncInBackground("upsert", { sheet: "Vendas", row: venda });
 }
 
+// Apaga a venda e seus itens, devolvendo as quantidades vendidas pro
+// estoque (a venda está sendo desfeita, não só removida do histórico).
+function excluirVenda(vendaId) {
+  const venda = db.vendas.find((v) => v.id === vendaId);
+  if (!venda) return;
+  const itens = db.itensVenda.filter((i) => i.vendaId === vendaId);
+  const estoquesAfetados = [];
+
+  itens.forEach((item) => {
+    const registro = getEstoque(item.produtoId);
+    if (registro) {
+      registro.quantidadeAtual += item.quantidade;
+      estoquesAfetados.push(registro);
+    }
+  });
+
+  db.itensVenda = db.itensVenda.filter((i) => i.vendaId !== vendaId);
+  db.vendas = db.vendas.filter((v) => v.id !== vendaId);
+  saveDB();
+
+  itens.forEach((i) => syncInBackground("deletar", { sheet: "ItensVenda", id: i.id }));
+  syncInBackground("deletar", { sheet: "Vendas", id: vendaId });
+  estoquesAfetados.forEach((registro) => syncInBackground("upsert", { sheet: "Estoque", row: registro }));
+}
+
 function ajustarEstoque(produtoId, tipoOperacao, quantidade) {
   const registro = getEstoque(produtoId);
   if (!registro) return;
@@ -981,14 +1006,19 @@ function showToast(mensagem) {
   }, 2200);
 }
 
-function openConfirm({ title, message, confirmText = "Confirmar", cancelText = "Cancelar", danger = false, onConfirm }) {
+function openConfirm({ title, message, confirmText = "Confirmar", cancelText = "Cancelar", danger = false, onConfirm, somenteConfirmar = false }) {
   const modal = document.getElementById("modal-confirm");
   modal.querySelector(".modal__title").textContent = title;
-  modal.querySelector(".modal__message").textContent = message;
+  const messageEl = modal.querySelector(".modal__message");
+  // Mensagens com quebra de linha (ex.: resumo de pagamento) viram <br> —
+  // o resto do app só usa texto simples, então isso não afeta nada mais.
+  if (message.includes("\n")) messageEl.innerHTML = message.replace(/\n/g, "<br>");
+  else messageEl.textContent = message;
   const btnConfirm = modal.querySelector(".modal__confirm-btn");
   const btnCancel = modal.querySelector(".modal__cancel-btn");
   btnConfirm.textContent = confirmText;
   btnCancel.textContent = cancelText;
+  btnCancel.classList.toggle("hidden", somenteConfirmar);
   btnConfirm.classList.toggle("btn--danger", danger);
 
   const cleanup = () => {
@@ -1223,6 +1253,7 @@ function renderVendaView() {
                     <div class="list-item__value-row">
                       <span class="list-item__value">${formatCurrency(v.valorTotal)}</span>
                       <button class="list-item__edit-btn" data-action="editar-valor-venda" data-venda-id="${v.id}" aria-label="Editar valor total">✏️</button>
+                      <button class="list-item__edit-btn" data-action="excluir-venda" data-venda-id="${v.id}" aria-label="Excluir venda">🗑️</button>
                     </div>
                     <span class="badge">${badge.emoji} ${badge.label}</span>
                   </div>
@@ -1247,6 +1278,29 @@ function renderVendaView() {
       e.stopPropagation();
       abrirEditarValorVenda(btn.dataset.vendaId);
     });
+  });
+  el.querySelectorAll('[data-action="excluir-venda"]').forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      confirmarExcluirVenda(btn.dataset.vendaId);
+    });
+  });
+}
+
+function confirmarExcluirVenda(vendaId) {
+  const venda = db.vendas.find((v) => v.id === vendaId);
+  if (!venda) return;
+  const cliente = getCliente(venda.clienteId);
+  openConfirm({
+    title: "🗑️ Excluir venda",
+    message: `Excluir a venda de ${formatCurrency(venda.valorTotal)} de ${cliente ? cliente.nome : "Cliente"}? Os produtos vendidos voltam pro estoque. Essa ação não pode ser desfeita.`,
+    confirmText: "Excluir",
+    danger: true,
+    onConfirm: () => {
+      excluirVenda(vendaId);
+      showToast("Venda excluída.");
+      renderView(ui.viewAtual);
+    },
   });
 }
 
@@ -1284,42 +1338,50 @@ function filtrarClientes(termo) {
 
 function renderClientes() {
   const el = document.getElementById("view-clientes");
-  const lista = filtrarClientes(ui.clientes.busca).slice().sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
 
   el.innerHTML = `
     <h2 class="view-title">👥 Clientes</h2>
     <input type="search" id="clientes-busca" class="search-input" placeholder="Buscar por nome ou telefone" value="${ui.clientes.busca}" />
     <button class="btn btn--secondary btn--block" id="clientes-novo-btn">+ Novo cliente</button>
-    <ul class="list">
-      ${
-        lista.length === 0
-          ? `<li class="empty-state">Nenhum cliente encontrado.</li>`
-          : lista
-              .map((c) => {
-                const saldo = calcularSaldoCliente(c.id);
-                const status = calcularStatusCliente(c.id);
-                return `
-                <li class="list-item" data-cliente-id="${c.id}">
-                  <div class="list-item__main">
-                    <strong>${c.nome}</strong>
-                    <span class="list-item__meta">📱 ${formatPhone(c.telefone)}</span>
-                  </div>
-                  <div class="list-item__side">
-                    <span class="badge">${status.emoji} ${saldo > 0 ? `Deve ${formatCurrency(saldo)}` : "Em dia"}</span>
-                  </div>
-                </li>`;
-              })
-              .join("")
-      }
-    </ul>
+    <ul class="list" id="clientes-lista"></ul>
   `;
 
+  renderListaClientes();
+
+  // A busca só re-renderiza a lista (não o campo em si) — recriar o input a
+  // cada tecla digitada tira o foco dele e só deixa digitar uma letra por vez.
   document.getElementById("clientes-busca").addEventListener("input", (e) => {
     ui.clientes.busca = e.target.value;
-    renderClientes();
+    renderListaClientes();
   });
   document.getElementById("clientes-novo-btn").addEventListener("click", () => abrirFormNovoCliente());
-  el.querySelectorAll("[data-cliente-id]").forEach((item) => {
+}
+
+function renderListaClientes() {
+  const lista = filtrarClientes(ui.clientes.busca).slice().sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+  const ul = document.getElementById("clientes-lista");
+
+  ul.innerHTML =
+    lista.length === 0
+      ? `<li class="empty-state">Nenhum cliente encontrado.</li>`
+      : lista
+          .map((c) => {
+            const saldo = calcularSaldoCliente(c.id);
+            const status = calcularStatusCliente(c.id);
+            return `
+            <li class="list-item" data-cliente-id="${c.id}">
+              <div class="list-item__main">
+                <strong>${c.nome}</strong>
+                <span class="list-item__meta">📱 ${formatPhone(c.telefone)}</span>
+              </div>
+              <div class="list-item__side">
+                <span class="badge">${status.emoji} ${saldo > 0 ? `Deve ${formatCurrency(saldo)}` : "Em dia"}</span>
+              </div>
+            </li>`;
+          })
+          .join("");
+
+  ul.querySelectorAll("[data-cliente-id]").forEach((item) => {
     item.addEventListener("click", () => abrirPerfilCliente(item.dataset.clienteId));
   });
 }
@@ -1538,15 +1600,28 @@ function abrirFormPagamento(cliente) {
         showToast("Informe um valor válido.");
         return;
       }
+      const saldoAntes = saldo;
       const resultado = registrarPagamento(cliente.id, values.valor, values.forma);
       const novoSaldo = calcularSaldoCliente(cliente.id);
-      showToast(
-        novoSaldo <= 0
-          ? "🟢 Dívida quitada!"
-          : `Pagamento registrado. Novo saldo: ${formatCurrency(novoSaldo)}`
-      );
       renderPerfilCliente();
+      mostrarResumoPagamento({ cliente, saldoAntes, valorPago: resultado.valorAplicado, novoSaldo });
     },
+  });
+}
+
+// Resumo grande e detalhado do pagamento (devia / pagou / restou) — a
+// "confirmação gritante" pedida, em vez de só um toast pequeno.
+function mostrarResumoPagamento({ cliente, saldoAntes, valorPago, novoSaldo }) {
+  const quitado = novoSaldo <= 0.004;
+  openConfirm({
+    title: quitado ? "🟢 Dívida quitada!" : "💰 Pagamento registrado",
+    message:
+      `<strong>${cliente.nome}</strong>\n` +
+      `Devia: ${formatCurrency(saldoAntes)}\n` +
+      `Pagou: <strong>${formatCurrency(valorPago)}</strong>\n` +
+      (quitado ? `Saldo: <strong style="color:var(--success)">R$ 0,00 🎉</strong>` : `Restou: <strong style="color:var(--danger)">${formatCurrency(novoSaldo)}</strong>`),
+    confirmText: "OK",
+    somenteConfirmar: true,
   });
 }
 
@@ -2250,31 +2325,24 @@ function stepHeader(titulo, mostrarVoltar) {
 // Passo 1 — selecionar cliente
 function renderPassoCliente() {
   const el = document.getElementById("overlay-nova-venda");
-  const lista = filtrarClientes(ui.novaVenda.buscaCliente);
 
   el.innerHTML = `
     ${stepHeader("Selecionar cliente", false)}
     <div class="overlay__body">
       <input type="search" id="venda-busca-cliente" class="search-input" placeholder="Buscar por nome ou telefone" value="${ui.novaVenda.buscaCliente}" />
       <button class="btn btn--secondary btn--block" id="venda-novo-cliente-btn">+ Novo cliente</button>
-      <ul class="list">
-        ${lista
-          .map((c) => {
-            const saldo = calcularSaldoCliente(c.id);
-            return `<li class="list-item" data-cliente-id="${c.id}">
-              <div class="list-item__main"><strong>${c.nome}</strong><span class="list-item__meta">📱 ${formatPhone(c.telefone)}</span></div>
-              <div class="list-item__side">${saldo > 0 ? `<span class="badge">🔴 ${formatCurrency(saldo)}</span>` : ""}</div>
-            </li>`;
-          })
-          .join("")}
-      </ul>
+      <ul class="list" id="venda-lista-clientes"></ul>
     </div>
   `;
 
+  renderListaClientesBusca();
+
   el.querySelector('[data-action="cancelar-venda"]').addEventListener("click", fecharNovaVenda);
+  // A busca só re-renderiza a lista (não o campo em si) — recriar o input a
+  // cada tecla digitada tira o foco dele e só deixa digitar uma letra por vez.
   document.getElementById("venda-busca-cliente").addEventListener("input", (e) => {
     ui.novaVenda.buscaCliente = e.target.value;
-    renderPassoCliente();
+    renderListaClientesBusca();
   });
   document.getElementById("venda-novo-cliente-btn").addEventListener("click", () => {
     abrirFormNovoCliente((cliente) => {
@@ -2283,7 +2351,23 @@ function renderPassoCliente() {
       renderNovaVenda();
     });
   });
-  el.querySelectorAll("[data-cliente-id]").forEach((item) => {
+}
+
+function renderListaClientesBusca() {
+  const lista = filtrarClientes(ui.novaVenda.buscaCliente);
+  const ul = document.getElementById("venda-lista-clientes");
+
+  ul.innerHTML = lista
+    .map((c) => {
+      const saldo = calcularSaldoCliente(c.id);
+      return `<li class="list-item" data-cliente-id="${c.id}">
+        <div class="list-item__main"><strong>${c.nome}</strong><span class="list-item__meta">📱 ${formatPhone(c.telefone)}</span></div>
+        <div class="list-item__side">${saldo > 0 ? `<span class="badge">🔴 ${formatCurrency(saldo)}</span>` : ""}</div>
+      </li>`;
+    })
+    .join("");
+
+  ul.querySelectorAll("[data-cliente-id]").forEach((item) => {
     item.addEventListener("click", () => {
       ui.novaVenda.clienteId = item.dataset.clienteId;
       ui.novaVenda.step = 2;
