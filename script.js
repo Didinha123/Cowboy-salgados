@@ -640,11 +640,23 @@ function editarCliente(clienteId, { nome, telefone, observacao }) {
   syncInBackground("upsert", { sheet: "Clientes", row: cliente });
 }
 
-// Remove o cadastro do cliente. O histórico de vendas/pagamentos dele
-// continua existindo (só o cliente some da lista e dos relatórios de nome).
+// Remove o cliente e tudo que está vinculado a ele (vendas, itens dessas
+// vendas e pagamentos) — tanto localmente quanto na planilha.
 function excluirCliente(clienteId) {
+  const vendasDoCliente = db.vendas.filter((v) => v.clienteId === clienteId);
+  const vendaIds = new Set(vendasDoCliente.map((v) => v.id));
+  const itensDoCliente = db.itensVenda.filter((i) => vendaIds.has(i.vendaId));
+  const pagamentosDoCliente = db.pagamentos.filter((p) => p.clienteId === clienteId);
+
+  db.itensVenda = db.itensVenda.filter((i) => !vendaIds.has(i.vendaId));
+  db.vendas = db.vendas.filter((v) => v.clienteId !== clienteId);
+  db.pagamentos = db.pagamentos.filter((p) => p.clienteId !== clienteId);
   db.clientes = db.clientes.filter((c) => c.id !== clienteId);
   saveDB();
+
+  itensDoCliente.forEach((i) => syncInBackground("deletar", { sheet: "ItensVenda", id: i.id }));
+  vendasDoCliente.forEach((v) => syncInBackground("deletar", { sheet: "Vendas", id: v.id }));
+  pagamentosDoCliente.forEach((p) => syncInBackground("deletar", { sheet: "Pagamentos", id: p.id }));
   syncInBackground("deletar", { sheet: "Clientes", id: clienteId });
 }
 
@@ -1477,17 +1489,25 @@ function abrirFormEditarCliente(cliente) {
 
 function confirmarExcluirCliente(cliente) {
   const saldo = calcularSaldoCliente(cliente.id);
+  const totalVendas = db.vendas.filter((v) => v.clienteId === cliente.id).length;
+  const totalPagamentos = db.pagamentos.filter((p) => p.clienteId === cliente.id).length;
+  const detalhesHistorico =
+    totalVendas > 0 || totalPagamentos > 0
+      ? ` Isso apaga também ${totalVendas} venda(s) e ${totalPagamentos} pagamento(s) do histórico dele.`
+      : "";
   openConfirm({
     title: "🗑️ Excluir cliente",
     message:
-      saldo > 0
-        ? `${cliente.nome} ainda tem ${formatCurrency(saldo)} em aberto. O histórico de vendas não é apagado, mas o cliente some da lista e das cobranças. Deseja continuar?`
-        : `Tem certeza que deseja excluir ${cliente.nome}? Essa ação não pode ser desfeita.`,
+      (saldo > 0
+        ? `${cliente.nome} ainda tem ${formatCurrency(saldo)} em aberto.`
+        : `Tem certeza que deseja excluir ${cliente.nome}?`) +
+      detalhesHistorico +
+      " Essa ação não pode ser desfeita.",
     confirmText: "Excluir",
     danger: true,
     onConfirm: () => {
       excluirCliente(cliente.id);
-      showToast("Cliente excluído.");
+      showToast("Cliente e histórico excluídos.");
       closeOverlay("overlay-cliente-perfil");
       renderView(ui.viewAtual);
     },
