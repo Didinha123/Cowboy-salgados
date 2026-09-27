@@ -2507,13 +2507,20 @@ function initEventListeners() {
   }
 }
 
+const SYNC_INTERVAL_MS = 60 * 1000;
+
 function init() {
   loadApiUrl();
   initDB();
   initEventListeners();
   switchView("inicio"); // renderiza imediatamente com os dados locais/em cache
   setSyncStatus(apiUrl ? "offline" : "offline");
-  if (apiUrl) syncFromRemote({ silent: true }); // depois, atualiza em segundo plano com a planilha
+  if (apiUrl) {
+    syncFromRemote({ silent: true }); // depois, atualiza em segundo plano com a planilha
+    setInterval(() => {
+      if (apiUrl) syncFromRemote({ silent: true });
+    }, SYNC_INTERVAL_MS);
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);
