@@ -156,6 +156,23 @@ select {
   color: var(--warning);
 }
 
+.fiado-grupo-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  margin: 12px 0 -4px;
+  background: var(--primary);
+  color: #fff;
+  border-radius: var(--radius-lg);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.fiado-grupo-header:first-child {
+  margin-top: 0;
+}
+
 /* ---------------------------------- Views ---------------------------------- */
 
 .views {
