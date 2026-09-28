@@ -1754,26 +1754,49 @@ function renderFiado() {
       ${
         vendasFiado.length === 0
           ? `<li class="empty-state">Nenhuma venda fiado encontrada com esses filtros.</li>`
-          : vendasFiado
-              .map((v) => {
-                const cliente = getCliente(v.clienteId);
-                const badge = getStatusPagamento(v);
-                const atrasada = isVendaAtrasada(v);
-                const pendente = v.status !== "pago";
-                const metaPartes = [`Venda: ${formatDateShort(v.data)}`];
-                if (v.dataPrevisaoPagamento) metaPartes.push(`Previsto: ${formatDateOnly(v.dataPrevisaoPagamento)}`);
-                if (v.dataPagamento) metaPartes.push(`Pago em: ${formatDateShort(v.dataPagamento)}`);
-                let infoPagamento = "";
-                if (v.status === "pago") {
-                  infoPagamento = `<span class="fiado-item__pagamento fiado-item__pagamento--completo">✅ Pago integral: ${formatCurrency(v.valorPago)}</span>`;
-                } else if (v.status === "parcial") {
-                  infoPagamento = `<span class="fiado-item__pagamento fiado-item__pagamento--parcial">💰 Pago ${formatCurrency(v.valorPago)} de ${formatCurrency(v.valorTotal)} — falta ${formatCurrency(v.valorRestante)}</span>`;
-                }
-                return `
+          : (() => {
+              // Acumula (soma) o que falta pagar por cliente, respeitando os
+              // filtros aplicados acima — usado no cabeçalho de cada grupo.
+              const acumuladoPorCliente = new Map();
+              vendasFiado.forEach((v) => {
+                acumuladoPorCliente.set(v.clienteId, (acumuladoPorCliente.get(v.clienteId) || 0) + v.valorRestante);
+              });
+
+              let ultimoClienteId = null;
+              return vendasFiado
+                .map((v) => {
+                  const cliente = getCliente(v.clienteId);
+                  const badge = getStatusPagamento(v);
+                  const atrasada = isVendaAtrasada(v);
+                  const pendente = v.status !== "pago";
+                  const metaPartes = [`Venda: ${formatDateShort(v.data)}`];
+                  if (v.dataPrevisaoPagamento) metaPartes.push(`Previsto: ${formatDateOnly(v.dataPrevisaoPagamento)}`);
+                  if (v.dataPagamento) metaPartes.push(`Pago em: ${formatDateShort(v.dataPagamento)}`);
+                  let infoPagamento = "";
+                  if (v.status === "pago") {
+                    infoPagamento = `<span class="fiado-item__pagamento fiado-item__pagamento--completo">✅ Pago integral: ${formatCurrency(v.valorPago)}</span>`;
+                  } else if (v.status === "parcial") {
+                    infoPagamento = `<span class="fiado-item__pagamento fiado-item__pagamento--parcial">💰 Pago ${formatCurrency(v.valorPago)} de ${formatCurrency(v.valorTotal)} — falta ${formatCurrency(v.valorRestante)}</span>`;
+                  }
+
+                  let headerHtml = "";
+                  if (v.clienteId !== ultimoClienteId) {
+                    ultimoClienteId = v.clienteId;
+                    const acumulado = acumuladoPorCliente.get(v.clienteId) || 0;
+                    headerHtml = `
+                    <li class="fiado-grupo-header" data-action="abrir-cliente" data-cliente-id="${v.clienteId}">
+                      <span>${cliente ? cliente.nome : "Cliente"}</span>
+                      <strong>${acumulado > 0 ? `Acumulado: ${formatCurrency(acumulado)}` : "Sem saldo em aberto"}</strong>
+                    </li>`;
+                  }
+
+                  return (
+                    headerHtml +
+                    `
                 <li class="list-item fiado-item" data-venda-id="${v.id}">
-                  <div class="list-item__main" data-action="abrir-cliente">
-                    <strong>${cliente ? cliente.nome : "Cliente"}</strong>
-                    <span class="list-item__meta">${metaPartes.join(" · ")}</span>
+                  <div class="list-item__main">
+                    <strong>${formatDateShort(v.data)}</strong>
+                    <span class="list-item__meta">${metaPartes.slice(1).join(" · ")}</span>
                     ${infoPagamento}
                   </div>
                   <div class="list-item__side">
@@ -1790,9 +1813,11 @@ function renderFiado() {
                         : ""
                     }
                   </div>
-                </li>`;
-              })
-              .join("")
+                </li>`
+                  );
+                })
+                .join("");
+            })()
       }
     </ul>
   `;
@@ -1826,10 +1851,12 @@ function renderFiado() {
     renderFiado();
   });
 
+  el.querySelectorAll('[data-action="abrir-cliente"]').forEach((header) => {
+    header.addEventListener("click", () => abrirPerfilCliente(header.dataset.clienteId));
+  });
   el.querySelectorAll(".fiado-item").forEach((item) => {
     const venda = db.vendas.find((v) => v.id === item.dataset.vendaId);
     if (!venda) return;
-    item.querySelector('[data-action="abrir-cliente"]')?.addEventListener("click", () => abrirPerfilCliente(venda.clienteId));
     item.querySelector('[data-action="marcar-pago"]')?.addEventListener("click", (ev) => {
       ev.stopPropagation();
       abrirFormMarcarPago(venda);
