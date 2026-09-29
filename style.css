@@ -136,6 +136,17 @@ select {
   margin: 0;
 }
 
+.date-presets {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.date-presets .btn {
+  flex: 1;
+  margin: 0;
+}
+
 .fiado-item__pagamento {
   display: block;
   margin-top: 4px;
