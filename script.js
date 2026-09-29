@@ -487,8 +487,15 @@ function formatDateOnly(dateKey) {
 // "AAAA-MM-DD" de qualquer coisa que vier.
 function normalizarDataChave(valor) {
   if (!valor) return null;
-  const match = String(valor).match(/^(\d{4}-\d{2}-\d{2})/);
-  return match ? match[1] : null;
+  const texto = String(valor);
+  const isoMatch = texto.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoMatch) return isoMatch[1];
+  // A planilha às vezes devolve um formato "por extenso" tipo
+  // "Wed Oct 14 2026 00:00:00 GMT-0300 (...)" — deixa o JS reconhecer esse
+  // formato (ele entende nativamente) e remonta a partir dos componentes
+  // locais, em vez de simplesmente descartar a data.
+  const d = new Date(texto);
+  return isNaN(d.getTime()) ? null : toDateKey(d);
 }
 
 function formatDateTime(iso) {
