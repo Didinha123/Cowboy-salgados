@@ -406,6 +406,45 @@ function resetToSeed() {
   saveDB();
 }
 
+// Usado por "⚠️ Apagar todos os dados": zera de verdade (sem repor vendas e
+// pagamentos de demonstração). O modo de exemplo (buildSeedDB) só faz
+// sentido na primeiríssima abertura do app, nunca depois de já ter dados
+// reais — repor vendas fictícias aqui é o que fazia sobrar valor em
+// "Recebimentos" mesmo depois de apagar tudo.
+function buildEmptyDB() {
+  return {
+    clientes: [
+      {
+        id: CLIENTE_AVULSO_ID,
+        nome: "Cliente Avulso (Balcão)",
+        telefone: "",
+        observacao: "Venda rápida sem cadastro completo.",
+        fixo: true,
+        createdAt: new Date().toISOString(),
+      },
+    ],
+    produtos: [
+      { id: PRODUTO_IDS.SALGADO, nome: "Salgado", tipo: "salgado", unidade: "un", icon: "🥟" },
+      { id: PRODUTO_IDS.REFRIGERANTE, nome: "Refrigerante 200ml", tipo: "refrigerante", unidade: "un", icon: "🥤" },
+      { id: PRODUTO_IDS.TRUFA, nome: "Trufa", tipo: "trufa", unidade: "un", icon: "🍫" },
+    ],
+    vendas: [],
+    itensVenda: [],
+    pagamentos: [],
+    estoque: [
+      { produtoId: PRODUTO_IDS.SALGADO, quantidadeAtual: 0, estoqueMinimo: 20 },
+      { produtoId: PRODUTO_IDS.REFRIGERANTE, quantidadeAtual: 0, estoqueMinimo: 12 },
+      { produtoId: PRODUTO_IDS.TRUFA, quantidadeAtual: 0, estoqueMinimo: 10 },
+    ],
+    configuracoes: { ...DEFAULT_CONFIGURACOES },
+  };
+}
+
+function apagarTudoLocal() {
+  db = buildEmptyDB();
+  saveDB();
+}
+
 /* ==========================================================================
    4. UTILITÁRIOS
    ========================================================================== */
@@ -591,15 +630,22 @@ function getAlertasEstoque() {
     .map((e) => ({ ...e, produto: getProduto(e.produtoId) }));
 }
 
-function getRecebimentosDoDia(referenceDate = new Date()) {
+// À vista = dinheiro que entra na hora da venda. Recebido de fiado = dívida
+// antiga sendo quitada agora. São coisas diferentes — nunca somar as duas
+// num "recebimentos do dia" só, senão parece que a venda de hoje foi maior
+// do que realmente foi.
+function getVistaHoje(referenceDate = new Date()) {
   const key = toDateKey(referenceDate);
-  const vistaHoje = db.vendas
+  return db.vendas
     .filter((v) => v.formaPagamento !== "fiado" && toDateKey(v.data) === key)
     .reduce((sum, v) => sum + v.valorPago, 0);
-  const pagamentosHoje = db.pagamentos
+}
+
+function getRecebidoFiadoHoje(referenceDate = new Date()) {
+  const key = toDateKey(referenceDate);
+  return db.pagamentos
     .filter((p) => toDateKey(p.data) === key)
     .reduce((sum, p) => sum + p.valor, 0);
-  return vistaHoje + pagamentosHoje;
 }
 
 function getFiadoEmAbertoTotal() {
@@ -938,7 +984,10 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
   const faturamentoTotal = vendasPeriodo.reduce((sum, v) => sum + v.valorTotal, 0);
   const valorFiado = vendasFiado.reduce((sum, v) => sum + v.valorTotal, 0);
   const valorAindaAReceber = vendasFiado.reduce((sum, v) => sum + v.valorRestante, 0);
-  const valorRecebido = vendasVista.reduce((sum, v) => sum + v.valorPago, 0) + pagamentosPeriodo.reduce((sum, p) => sum + p.valor, 0);
+  // Separados de propósito: "à vista" é dinheiro que entra na hora da venda;
+  // "recebido fiado" é dívida antiga sendo paga agora — não é a mesma coisa.
+  const valorRecebidoVista = vendasVista.reduce((sum, v) => sum + v.valorPago, 0);
+  const valorRecebidoFiado = pagamentosPeriodo.reduce((sum, p) => sum + p.valor, 0);
 
   return {
     periodo: { start, end },
@@ -947,7 +996,8 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
     refrigerantes: somaPorTipo("refrigerante"),
     trufas: somaPorTipo("trufa"),
     faturamentoTotal,
-    valorRecebido,
+    valorRecebidoVista,
+    valorRecebidoFiado,
     valorFiado,
     valorAindaAReceber,
     formasPagamento,
@@ -1128,7 +1178,8 @@ function renderDashboard() {
   const meta = config.metaDiaria;
   const percentualMeta = Math.min(999, Math.round((salgadosVendidosHoje / meta) * 100));
   const fiadoAberto = getFiadoEmAbertoTotal();
-  const recebimentosHoje = getRecebimentosDoDia();
+  const vistaHoje = getVistaHoje();
+  const recebidoFiadoHoje = getRecebidoFiadoHoje();
   const alertas = getAlertasEstoque();
   const fiadoAtrasado = getVendasFiadoAtrasadas();
 
@@ -1167,15 +1218,10 @@ function renderDashboard() {
       </div>
     </div>
 
-    <div class="dash-grid">
-      <div class="dash-card dash-card--danger">
-        <span class="dash-card__label">Fiado em aberto</span>
-        <span class="dash-card__value">📒 ${formatCurrency(fiadoAberto)}</span>
-      </div>
-      <div class="dash-card dash-card--success">
-        <span class="dash-card__label">Recebimentos do dia</span>
-        <span class="dash-card__value">💵 ${formatCurrency(recebimentosHoje)}</span>
-      </div>
+    <div class="stat-row">
+      <div class="stat-box"><span>📒 Fiado em aberto</span><strong>${formatCurrency(fiadoAberto)}</strong></div>
+      <div class="stat-box"><span>💵 À vista hoje</span><strong>${formatCurrency(vistaHoje)}</strong></div>
+      <div class="stat-box"><span>💰 Recebido (fiado)</span><strong>${formatCurrency(recebidoFiadoHoje)}</strong></div>
     </div>
 
     ${
@@ -2052,7 +2098,8 @@ function renderRelatorio() {
 
       <h4 class="section-subtitle">Financeiro</h4>
       <ul class="stat-list">
-        <li><span>Valor recebido</span><strong>${formatCurrency(relatorio.valorRecebido)}</strong></li>
+        <li><span>💵 Recebido à vista</span><strong>${formatCurrency(relatorio.valorRecebidoVista)}</strong></li>
+        <li><span>💰 Recebido de fiado</span><strong>${formatCurrency(relatorio.valorRecebidoFiado)}</strong></li>
         <li><span>Valor vendido fiado</span><strong>${formatCurrency(relatorio.valorFiado)}</strong></li>
         <li><span>Ainda a receber (período)</span><strong>${formatCurrency(relatorio.valorAindaAReceber)}</strong></li>
       </ul>
@@ -2293,11 +2340,11 @@ function confirmarApagarTudo() {
         title: "Tem certeza absoluta?",
         message: apiUrl
           ? "Essa ação NÃO pode ser desfeita e também vai limpar a planilha conectada."
-          : "Essa ação NÃO pode ser desfeita. Os dados de exemplo iniciais serão restaurados.",
+          : "Essa ação NÃO pode ser desfeita. Tudo ficará vazio (só o Cliente Avulso continua).",
         confirmText: "Apagar tudo",
         danger: true,
         onConfirm: () => {
-          resetToSeed();
+          apagarTudoLocal();
           showToast("Todos os dados foram apagados.");
           closeOverlay("overlay-configuracoes");
           switchView("inicio");
@@ -2545,6 +2592,11 @@ function renderPassoPagamento() {
         forma === "fiado"
           ? `<div class="form-field">
               <label for="venda-data-previsao">Data prevista de pagamento</label>
+              <div class="date-presets">
+                <button type="button" class="btn btn--small btn--secondary" data-dias="7">+7 dias</button>
+                <button type="button" class="btn btn--small btn--secondary" data-dias="15">+15 dias</button>
+                <button type="button" class="btn btn--small btn--secondary" data-dias="30">+30 dias</button>
+              </div>
               <input type="date" id="venda-data-previsao" value="${ui.novaVenda.dataPrevisaoPagamento}" />
             </div>
             <p class="fiado-note">🔵 Esta venda será registrada como fiado na conta de <strong>${cliente.nome}</strong>.</p>`
@@ -2580,6 +2632,15 @@ function renderPassoPagamento() {
       ui.novaVenda.dataPrevisaoPagamento = e.target.value;
     });
   }
+  // Atalhos pra não depender do calendário nativo do celular (que em
+  // alguns aparelhos não abre ou não mostra a data direito).
+  el.querySelectorAll("[data-dias]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const novaData = toDateKey(addDays(new Date(), Number(btn.dataset.dias)));
+      ui.novaVenda.dataPrevisaoPagamento = novaData;
+      if (previsaoInput) previsaoInput.value = novaData;
+    });
+  });
   const descontoInput = document.getElementById("venda-desconto");
   if (descontoInput) {
     descontoInput.addEventListener("input", (e) => {
