@@ -146,7 +146,11 @@ async function syncFromRemote({ silent = false } = {}) {
     if (!remote || !remote.clientes || !remote.vendas || !remote.produtos || !remote.estoque) {
       throw new Error("Resposta da planilha veio incompleta.");
     }
-    db = { ...remote, configuracoes: remote.configuracoes || { ...DEFAULT_CONFIGURACOES } };
+    db = {
+      ...remote,
+      vendas: remote.vendas.map((v) => ({ ...v, dataPrevisaoPagamento: normalizarDataChave(v.dataPrevisaoPagamento) })),
+      configuracoes: remote.configuracoes || { ...DEFAULT_CONFIGURACOES },
+    };
     saveDB();
     setSyncStatus("online");
     renderView(ui.viewAtual);
@@ -387,12 +391,24 @@ function initDB() {
   if (!db) {
     db = buildSeedDB();
     saveDB();
-  } else if (!db.configuracoes) {
-    // Autorreparo: uma sincronização antiga com a planilha (antes do fix do
-    // Apps Script) pode ter salvo o banco local sem "configuracoes". Sem
-    // isso o painel Início quebra pra sempre — repõe os padrões pra destravar.
-    db.configuracoes = { ...DEFAULT_CONFIGURACOES };
-    saveDB();
+  } else {
+    let precisaSalvar = false;
+    if (!db.configuracoes) {
+      // Autorreparo: uma sincronização antiga com a planilha (antes do fix do
+      // Apps Script) pode ter salvo o banco local sem "configuracoes". Sem
+      // isso o painel Início quebra pra sempre — repõe os padrões pra destravar.
+      db.configuracoes = { ...DEFAULT_CONFIGURACOES };
+      precisaSalvar = true;
+    }
+    // Autorreparo: datas previstas salvas com hora (ex.: vindas da planilha
+    // antes desse fix) quebravam o campo de data nativo ("Data inválida").
+    db.vendas.forEach((v) => {
+      if (v.dataPrevisaoPagamento && !/^\d{4}-\d{2}-\d{2}$/.test(v.dataPrevisaoPagamento)) {
+        v.dataPrevisaoPagamento = normalizarDataChave(v.dataPrevisaoPagamento);
+        precisaSalvar = true;
+      }
+    });
+    if (precisaSalvar) saveDB();
   }
 }
 
@@ -461,6 +477,18 @@ function formatDateOnly(dateKey) {
   if (!dateKey) return "—";
   const [y, m, d] = dateKey.split("-").map(Number);
   return new Date(y, m - 1, d).toLocaleDateString("pt-BR");
+}
+
+// A planilha às vezes guarda "dataPrevisaoPagamento" como data de verdade
+// (não texto) e devolve algo como "2026-10-19T03:00:00.000Z" em vez de
+// "2026-10-19" — isso quebra o campo <input type="date"> (exige só
+// AAAA-MM-DD) e aparecia como "Data inválida". Em vez de confiar que a
+// planilha sempre manda o formato certo, normaliza aqui: pega só a parte
+// "AAAA-MM-DD" de qualquer coisa que vier.
+function normalizarDataChave(valor) {
+  if (!valor) return null;
+  const match = String(valor).match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : null;
 }
 
 function formatDateTime(iso) {
