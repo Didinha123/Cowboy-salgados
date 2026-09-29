@@ -61,23 +61,18 @@ function generateId(prefix) {
    escrita, tentamos sincronizar em segundo plano, sem travar a interface.
    ========================================================================== */
 
-const API_URL_STORAGE_KEY = "cowboySalgadosApiUrl";
-// Planilha compartilhada padrão: assim qualquer aparelho novo já abre
-// conectado nela, sem precisar colar a URL manualmente nas Configurações.
+// Planilha compartilhada do negócio — fixa no código, igual em todo aparelho.
+// Isso é de propósito: já tivemos um aparelho ficar preso numa URL antiga
+// salva localmente enquanto os outros usavam a nova, e vendas sumindo entre
+// aparelhos por causa disso. Sem "cada aparelho guarda sua própria URL",
+// esse jeito de dessincronizar não existe mais.
 const DEFAULT_API_URL =
   "https://script.google.com/macros/s/AKfycby7gdpXO1dJdiTK4Buyv9XDROx1NJOVB9qyQrUd_TAFgK883Qr9MVg79Nq3fxcbIG7Ehw/exec";
 let apiUrl = "";
 let lastSyncAt = null;
 
 function loadApiUrl() {
-  const saved = localStorage.getItem(API_URL_STORAGE_KEY);
-  apiUrl = saved !== null ? saved : DEFAULT_API_URL;
-}
-
-function saveApiUrl(url) {
-  apiUrl = (url || "").trim();
-  if (apiUrl) localStorage.setItem(API_URL_STORAGE_KEY, apiUrl);
-  else localStorage.removeItem(API_URL_STORAGE_KEY);
+  apiUrl = DEFAULT_API_URL;
 }
 
 // Busca o estado completo da planilha (fonte de verdade quando conectado).
@@ -1025,7 +1020,7 @@ const ui = {
   venda: { clienteFiltro: "" },
   fiado: {
     ordenacao: "previsao-proxima",
-    clienteFiltro: "",
+    buscaCliente: "",
     statusFiltro: "FIADO_PENDENTE",
     periodoFiltro: "todos",
     customStart: null,
@@ -1704,38 +1699,7 @@ function renderFiado() {
   const clientesDevendo = clientesComHistorico.filter((c) => calcularSaldoCliente(c.id) > 0);
   const emAtraso = clientesDevendo.filter((c) => db.vendas.some((v) => v.clienteId === c.id && isVendaAtrasada(v)));
 
-  const { clienteFiltro, statusFiltro, periodoFiltro, customStart, customEnd, ordenacao } = ui.fiado;
-
-  let vendasFiado = db.vendas.filter((v) => v.formaPagamento === "fiado");
-  if (clienteFiltro) vendasFiado = vendasFiado.filter((v) => v.clienteId === clienteFiltro);
-  if (statusFiltro) vendasFiado = vendasFiado.filter((v) => getStatusPagamento(v).code === statusFiltro);
-  if (periodoFiltro && periodoFiltro !== "todos") {
-    const { start, end } = getPeriodoRange(periodoFiltro, customStart, customEnd);
-    vendasFiado = vendasFiado.filter((v) => {
-      const d = new Date(v.data);
-      return d >= start && d <= end;
-    });
-  }
-
-  vendasFiado = [...vendasFiado].sort((a, b) => {
-    const nomeA = getCliente(a.clienteId)?.nome || "";
-    const nomeB = getCliente(b.clienteId)?.nome || "";
-    if (ordenacao === "cliente-az") return nomeA.localeCompare(nomeB, "pt-BR");
-    if (ordenacao === "cliente-za") return nomeB.localeCompare(nomeA, "pt-BR");
-    if (ordenacao === "venda-recente") return new Date(b.data) - new Date(a.data);
-    if (ordenacao === "venda-antiga") return new Date(a.data) - new Date(b.data);
-    if (ordenacao === "valor") return b.valorTotal - a.valorTotal;
-    if (ordenacao === "status") return getStatusPagamento(a).label.localeCompare(getStatusPagamento(b).label);
-    if (ordenacao === "previsao-proxima") {
-      if (!a.dataPrevisaoPagamento && !b.dataPrevisaoPagamento) return 0;
-      if (!a.dataPrevisaoPagamento) return 1;
-      if (!b.dataPrevisaoPagamento) return -1;
-      return new Date(a.dataPrevisaoPagamento) - new Date(b.dataPrevisaoPagamento);
-    }
-    return new Date(b.data) - new Date(a.data);
-  });
-
-  const clientesOrdenados = [...db.clientes].sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+  const { buscaCliente, statusFiltro, periodoFiltro, customStart, customEnd, ordenacao } = ui.fiado;
 
   el.innerHTML = `
     <h2 class="view-title">📒 Fiado</h2>
@@ -1745,13 +1709,7 @@ function renderFiado() {
       <div class="stat-box"><span>Em atraso</span><strong>${emAtraso.length}</strong></div>
     </div>
 
-    <div class="form-field">
-      <label for="fiado-filtro-cliente">Cliente</label>
-      <select id="fiado-filtro-cliente">
-        <option value="">Todos os clientes</option>
-        ${clientesOrdenados.map((c) => `<option value="${c.id}" ${clienteFiltro === c.id ? "selected" : ""}>${c.nome}</option>`).join("")}
-      </select>
-    </div>
+    <input type="search" id="fiado-busca-cliente" class="search-input" placeholder="Buscar cliente por nome ou telefone" value="${buscaCliente}" />
 
     <div class="stat-row">
       <div class="form-field">
@@ -1796,81 +1754,16 @@ function renderFiado() {
       </select>
     </div>
 
-    <ul class="list">
-      ${
-        vendasFiado.length === 0
-          ? `<li class="empty-state">Nenhuma venda fiado encontrada com esses filtros.</li>`
-          : (() => {
-              // Acumula (soma) o que falta pagar por cliente, respeitando os
-              // filtros aplicados acima — usado no cabeçalho de cada grupo.
-              const acumuladoPorCliente = new Map();
-              vendasFiado.forEach((v) => {
-                acumuladoPorCliente.set(v.clienteId, (acumuladoPorCliente.get(v.clienteId) || 0) + v.valorRestante);
-              });
-
-              let ultimoClienteId = null;
-              return vendasFiado
-                .map((v) => {
-                  const cliente = getCliente(v.clienteId);
-                  const badge = getStatusPagamento(v);
-                  const atrasada = isVendaAtrasada(v);
-                  const pendente = v.status !== "pago";
-                  const metaPartes = [`Venda: ${formatDateShort(v.data)}`];
-                  if (v.dataPrevisaoPagamento) metaPartes.push(`Previsto: ${formatDateOnly(v.dataPrevisaoPagamento)}`);
-                  if (v.dataPagamento) metaPartes.push(`Pago em: ${formatDateShort(v.dataPagamento)}`);
-                  let infoPagamento = "";
-                  if (v.status === "pago") {
-                    infoPagamento = `<span class="fiado-item__pagamento fiado-item__pagamento--completo">✅ Pago integral: ${formatCurrency(v.valorPago)}</span>`;
-                  } else if (v.status === "parcial") {
-                    infoPagamento = `<span class="fiado-item__pagamento fiado-item__pagamento--parcial">💰 Pago ${formatCurrency(v.valorPago)} de ${formatCurrency(v.valorTotal)} — falta ${formatCurrency(v.valorRestante)}</span>`;
-                  }
-
-                  let headerHtml = "";
-                  if (v.clienteId !== ultimoClienteId) {
-                    ultimoClienteId = v.clienteId;
-                    const acumulado = acumuladoPorCliente.get(v.clienteId) || 0;
-                    headerHtml = `
-                    <li class="fiado-grupo-header" data-action="abrir-cliente" data-cliente-id="${v.clienteId}">
-                      <span>${cliente ? cliente.nome : "Cliente"}</span>
-                      <strong>${acumulado > 0 ? `Acumulado: ${formatCurrency(acumulado)}` : "Sem saldo em aberto"}</strong>
-                    </li>`;
-                  }
-
-                  return (
-                    headerHtml +
-                    `
-                <li class="list-item fiado-item" data-venda-id="${v.id}">
-                  <div class="list-item__main">
-                    <strong>${formatDateShort(v.data)}</strong>
-                    <span class="list-item__meta">${metaPartes.slice(1).join(" · ")}</span>
-                    ${infoPagamento}
-                  </div>
-                  <div class="list-item__side">
-                    ${pendente ? `<span class="list-item__value-label">Falta pagar</span>` : ""}
-                    <span class="list-item__value">${formatCurrency(pendente ? v.valorRestante : v.valorTotal)}</span>
-                    <span class="badge">${badge.emoji} ${badge.label}</span>
-                    ${atrasada ? `<span class="badge badge--danger">⏰ Atrasado</span>` : ""}
-                    ${
-                      pendente
-                        ? `<div class="fiado-item__actions">
-                            <button class="btn btn--small btn--secondary" data-action="editar-previsao">✏️ Previsão</button>
-                            <button class="btn btn--small btn--primary" data-action="marcar-pago">✅ Pago</button>
-                          </div>`
-                        : ""
-                    }
-                  </div>
-                </li>`
-                  );
-                })
-                .join("");
-            })()
-      }
-    </ul>
+    <ul class="list" id="fiado-lista"></ul>
   `;
 
-  document.getElementById("fiado-filtro-cliente").addEventListener("change", (e) => {
-    ui.fiado.clienteFiltro = e.target.value;
-    renderFiado();
+  renderFiadoLista();
+
+  // A busca só re-renderiza a lista (não o campo em si) — recriar o input a
+  // cada tecla digitada tira o foco dele e só deixa digitar uma letra por vez.
+  document.getElementById("fiado-busca-cliente").addEventListener("input", (e) => {
+    ui.fiado.buscaCliente = e.target.value;
+    renderFiadoLista();
   });
   document.getElementById("fiado-filtro-status").addEventListener("change", (e) => {
     ui.fiado.statusFiltro = e.target.value;
@@ -1896,11 +1789,121 @@ function renderFiado() {
     ui.fiado.ordenacao = e.target.value;
     renderFiado();
   });
+}
 
-  el.querySelectorAll('[data-action="abrir-cliente"]').forEach((header) => {
+function renderFiadoLista() {
+  const { buscaCliente, statusFiltro, periodoFiltro, customStart, customEnd, ordenacao } = ui.fiado;
+
+  let vendasFiado = db.vendas.filter((v) => v.formaPagamento === "fiado");
+  if (buscaCliente.trim()) {
+    const termo = buscaCliente.trim().toLowerCase();
+    const tDigits = onlyDigits(buscaCliente);
+    vendasFiado = vendasFiado.filter((v) => {
+      const c = getCliente(v.clienteId);
+      return c && (c.nome.toLowerCase().includes(termo) || (tDigits && c.telefone.includes(tDigits)));
+    });
+  }
+  if (statusFiltro) vendasFiado = vendasFiado.filter((v) => getStatusPagamento(v).code === statusFiltro);
+  if (periodoFiltro && periodoFiltro !== "todos") {
+    const { start, end } = getPeriodoRange(periodoFiltro, customStart, customEnd);
+    vendasFiado = vendasFiado.filter((v) => {
+      const d = new Date(v.data);
+      return d >= start && d <= end;
+    });
+  }
+
+  vendasFiado = [...vendasFiado].sort((a, b) => {
+    const nomeA = getCliente(a.clienteId)?.nome || "";
+    const nomeB = getCliente(b.clienteId)?.nome || "";
+    if (ordenacao === "cliente-az") return nomeA.localeCompare(nomeB, "pt-BR");
+    if (ordenacao === "cliente-za") return nomeB.localeCompare(nomeA, "pt-BR");
+    if (ordenacao === "venda-recente") return new Date(b.data) - new Date(a.data);
+    if (ordenacao === "venda-antiga") return new Date(a.data) - new Date(b.data);
+    if (ordenacao === "valor") return b.valorTotal - a.valorTotal;
+    if (ordenacao === "status") return getStatusPagamento(a).label.localeCompare(getStatusPagamento(b).label);
+    if (ordenacao === "previsao-proxima") {
+      if (!a.dataPrevisaoPagamento && !b.dataPrevisaoPagamento) return 0;
+      if (!a.dataPrevisaoPagamento) return 1;
+      if (!b.dataPrevisaoPagamento) return -1;
+      return new Date(a.dataPrevisaoPagamento) - new Date(b.dataPrevisaoPagamento);
+    }
+    return new Date(b.data) - new Date(a.data);
+  });
+
+  const ul = document.getElementById("fiado-lista");
+
+  ul.innerHTML =
+    vendasFiado.length === 0
+      ? `<li class="empty-state">Nenhuma venda fiado encontrada com esses filtros.</li>`
+      : (() => {
+          // Acumula (soma) o que falta pagar por cliente, respeitando os
+          // filtros aplicados acima — usado no cabeçalho de cada grupo.
+          const acumuladoPorCliente = new Map();
+          vendasFiado.forEach((v) => {
+            acumuladoPorCliente.set(v.clienteId, (acumuladoPorCliente.get(v.clienteId) || 0) + v.valorRestante);
+          });
+
+          let ultimoClienteId = null;
+          return vendasFiado
+            .map((v) => {
+              const cliente = getCliente(v.clienteId);
+              const badge = getStatusPagamento(v);
+              const atrasada = isVendaAtrasada(v);
+              const pendente = v.status !== "pago";
+              const metaPartes = [`Venda: ${formatDateShort(v.data)}`];
+              if (v.dataPrevisaoPagamento) metaPartes.push(`Previsto: ${formatDateOnly(v.dataPrevisaoPagamento)}`);
+              if (v.dataPagamento) metaPartes.push(`Pago em: ${formatDateShort(v.dataPagamento)}`);
+              let infoPagamento = "";
+              if (v.status === "pago") {
+                infoPagamento = `<span class="fiado-item__pagamento fiado-item__pagamento--completo">✅ Pago integral: ${formatCurrency(v.valorPago)}</span>`;
+              } else if (v.status === "parcial") {
+                infoPagamento = `<span class="fiado-item__pagamento fiado-item__pagamento--parcial">💰 Pago ${formatCurrency(v.valorPago)} de ${formatCurrency(v.valorTotal)} — falta ${formatCurrency(v.valorRestante)}</span>`;
+              }
+
+              let headerHtml = "";
+              if (v.clienteId !== ultimoClienteId) {
+                ultimoClienteId = v.clienteId;
+                const acumulado = acumuladoPorCliente.get(v.clienteId) || 0;
+                headerHtml = `
+                <li class="fiado-grupo-header" data-action="abrir-cliente" data-cliente-id="${v.clienteId}">
+                  <span>${cliente ? cliente.nome : "Cliente"}</span>
+                  <strong>${acumulado > 0 ? `Acumulado: ${formatCurrency(acumulado)}` : "Sem saldo em aberto"}</strong>
+                </li>`;
+              }
+
+              return (
+                headerHtml +
+                `
+            <li class="list-item fiado-item" data-venda-id="${v.id}">
+              <div class="list-item__main">
+                <strong>${formatDateShort(v.data)}</strong>
+                <span class="list-item__meta">${metaPartes.slice(1).join(" · ")}</span>
+                ${infoPagamento}
+              </div>
+              <div class="list-item__side">
+                ${pendente ? `<span class="list-item__value-label">Falta pagar</span>` : ""}
+                <span class="list-item__value">${formatCurrency(pendente ? v.valorRestante : v.valorTotal)}</span>
+                <span class="badge">${badge.emoji} ${badge.label}</span>
+                ${atrasada ? `<span class="badge badge--danger">⏰ Atrasado</span>` : ""}
+                ${
+                  pendente
+                    ? `<div class="fiado-item__actions">
+                        <button class="btn btn--small btn--secondary" data-action="editar-previsao">✏️ Previsão</button>
+                        <button class="btn btn--small btn--primary" data-action="marcar-pago">✅ Pago</button>
+                      </div>`
+                    : ""
+                }
+              </div>
+            </li>`
+              );
+            })
+            .join("");
+        })();
+
+  ul.querySelectorAll('[data-action="abrir-cliente"]').forEach((header) => {
     header.addEventListener("click", () => abrirPerfilCliente(header.dataset.clienteId));
   });
-  el.querySelectorAll(".fiado-item").forEach((item) => {
+  ul.querySelectorAll(".fiado-item").forEach((item) => {
     const venda = db.vendas.find((v) => v.id === item.dataset.vendaId);
     if (!venda) return;
     item.querySelector('[data-action="marcar-pago"]')?.addEventListener("click", (ev) => {
@@ -1935,12 +1938,12 @@ function abrirFormMarcarPago(venda) {
     onSubmit: (values) => {
       marcarVendaComoPaga(venda.id, values.forma);
       showToast("🟢 Fiado - Pago!");
-      renderFiado();
+      renderFiadoLista();
     },
   });
 }
 
-function abrirFormPrevisao(venda, onSaved = renderFiado) {
+function abrirFormPrevisao(venda, onSaved = renderFiadoLista) {
   openPrompt({
     title: "Data prevista de pagamento",
     fields: [{ id: "data", label: "Nova data prevista", type: "date", value: venda.dataPrevisaoPagamento || toDateKey(new Date()) }],
@@ -2188,24 +2191,14 @@ function renderConfiguracoes() {
       <div class="form-field"><label>Estoque mínimo (Salgado)</label><input id="cfg-min-salgado" type="number" inputmode="numeric" value="${c.estoqueMinimoSalgado}" /></div>
       <button class="btn btn--primary btn--block" id="cfg-salvar-btn">Salvar configurações</button>
 
-      <h4 class="section-subtitle">📊 Planilha do Google (opcional)</h4>
+      <h4 class="section-subtitle">📊 Planilha do Google</h4>
       <p class="field-hint">
-        Cole aqui a URL do "App da Web" do Apps Script para os dados ficarem salvos numa
-        planilha do Google, compartilhada entre todos os aparelhos. Deixe em branco para
-        usar apenas o armazenamento local deste aparelho.
+        Este app já vem conectado à planilha compartilhada do negócio — todo aparelho usa a
+        mesma automaticamente (sincroniza sozinho a cada minuto). Só use os botões abaixo
+        se precisar forçar uma atualização na hora.
       </p>
-      <div class="form-field">
-        <label>URL da planilha (Apps Script)</label>
-        <input id="cfg-api-url" type="url" placeholder="https://script.google.com/macros/s/.../exec" value="${apiUrl}" />
-      </div>
-      <button class="btn btn--secondary btn--block" id="cfg-api-salvar-btn">Salvar URL</button>
-      ${
-        apiUrl
-          ? `<p class="field-hint">Na primeira conexão, envie os dados deste aparelho para a planilha (ela começa vazia). Depois disso, use "Sincronizar" para trazer o que estiver na planilha.</p>
-             <button class="btn btn--secondary btn--block" id="cfg-api-enviar-btn">📤 Enviar dados deste aparelho para a planilha</button>
-             <button class="btn btn--secondary btn--block" id="cfg-api-sync-btn">🔄 Sincronizar a partir da planilha</button>`
-          : ""
-      }
+      <button class="btn btn--secondary btn--block" id="cfg-api-sync-btn">🔄 Sincronizar agora</button>
+      <button class="btn btn--secondary btn--block" id="cfg-api-enviar-btn">📤 Enviar dados deste aparelho para a planilha</button>
 
       <h4 class="section-subtitle">Segurança dos dados</h4>
       <button class="btn btn--secondary btn--block" id="cfg-exportar-btn">📤 Exportar dados</button>
@@ -2230,55 +2223,36 @@ function renderConfiguracoes() {
     renderView(ui.viewAtual);
   });
 
-  document.getElementById("cfg-api-salvar-btn").addEventListener("click", () => {
-    const url = document.getElementById("cfg-api-url").value.trim();
-    saveApiUrl(url);
-    if (url) {
-      setSyncStatus("offline");
-      showToast("URL salva! Agora envie os dados deste aparelho ou sincronize a partir da planilha.");
-    } else {
-      setSyncStatus("offline");
-      showToast("Planilha desconectada. Usando apenas os dados deste aparelho.");
-    }
-    renderConfiguracoes();
+  document.getElementById("cfg-api-enviar-btn").addEventListener("click", () => {
+    openConfirm({
+      title: "📤 Enviar dados para a planilha",
+      message: "Isso substitui todo o conteúdo da planilha pelos dados que estão salvos neste aparelho. Use isso só se a planilha estiver desatualizada. Deseja continuar?",
+      confirmText: "Enviar",
+      danger: true,
+      onConfirm: async () => {
+        setSyncStatus("syncing");
+        try {
+          await enviarTudoParaPlanilha();
+          setSyncStatus("online");
+          showToast("Dados enviados para a planilha!");
+        } catch (err) {
+          console.error("Erro ao enviar dados:", err);
+          setSyncStatus("offline");
+          showToast("Não foi possível enviar os dados para a planilha.");
+        }
+      },
+    });
   });
 
-  const enviarBtn = document.getElementById("cfg-api-enviar-btn");
-  if (enviarBtn) {
-    enviarBtn.addEventListener("click", () => {
-      openConfirm({
-        title: "📤 Enviar dados para a planilha",
-        message: "Isso substitui todo o conteúdo da planilha pelos dados que estão salvos neste aparelho. Use isso na primeira conexão. Deseja continuar?",
-        confirmText: "Enviar",
-        danger: true,
-        onConfirm: async () => {
-          setSyncStatus("syncing");
-          try {
-            await enviarTudoParaPlanilha();
-            setSyncStatus("online");
-            showToast("Dados enviados para a planilha!");
-          } catch (err) {
-            console.error("Erro ao enviar dados:", err);
-            setSyncStatus("offline");
-            showToast("Não foi possível enviar os dados para a planilha.");
-          }
-        },
-      });
+  document.getElementById("cfg-api-sync-btn").addEventListener("click", () => {
+    openConfirm({
+      title: "🔄 Sincronizar a partir da planilha",
+      message: "Isso substitui os dados deste aparelho pelos dados atuais da planilha. Deseja continuar?",
+      confirmText: "Sincronizar",
+      danger: true,
+      onConfirm: () => syncFromRemote(),
     });
-  }
-
-  const syncBtn = document.getElementById("cfg-api-sync-btn");
-  if (syncBtn) {
-    syncBtn.addEventListener("click", () => {
-      openConfirm({
-        title: "🔄 Sincronizar a partir da planilha",
-        message: "Isso substitui os dados deste aparelho pelos dados atuais da planilha. Deseja continuar?",
-        confirmText: "Sincronizar",
-        danger: true,
-        onConfirm: () => syncFromRemote(),
-      });
-    });
-  }
+  });
 
   document.getElementById("cfg-exportar-btn").addEventListener("click", exportarDados);
   document.getElementById("cfg-importar-input").addEventListener("change", (e) => {
@@ -2592,11 +2566,14 @@ function renderPassoPagamento() {
         forma === "fiado"
           ? `<div class="form-field">
               <label for="venda-data-previsao">Data prevista de pagamento</label>
+              <p class="date-selected" id="venda-data-selecionada">📅 ${formatDateOnly(ui.novaVenda.dataPrevisaoPagamento)}</p>
               <div class="date-presets">
                 <button type="button" class="btn btn--small btn--secondary" data-dias="7">+7 dias</button>
                 <button type="button" class="btn btn--small btn--secondary" data-dias="15">+15 dias</button>
+                <button type="button" class="btn btn--small btn--secondary" data-dias="20">+20 dias</button>
                 <button type="button" class="btn btn--small btn--secondary" data-dias="30">+30 dias</button>
               </div>
+              <label for="venda-data-previsao" class="field-hint">ou escolha uma data manualmente:</label>
               <input type="date" id="venda-data-previsao" value="${ui.novaVenda.dataPrevisaoPagamento}" />
             </div>
             <p class="fiado-note">🔵 Esta venda será registrada como fiado na conta de <strong>${cliente.nome}</strong>.</p>`
@@ -2627,9 +2604,11 @@ function renderPassoPagamento() {
     });
   });
   const previsaoInput = document.getElementById("venda-data-previsao");
+  const previsaoSelecionada = document.getElementById("venda-data-selecionada");
   if (previsaoInput) {
     previsaoInput.addEventListener("change", (e) => {
       ui.novaVenda.dataPrevisaoPagamento = e.target.value;
+      if (previsaoSelecionada) previsaoSelecionada.textContent = `📅 ${formatDateOnly(e.target.value)}`;
     });
   }
   // Atalhos pra não depender do calendário nativo do celular (que em
@@ -2639,6 +2618,7 @@ function renderPassoPagamento() {
       const novaData = toDateKey(addDays(new Date(), Number(btn.dataset.dias)));
       ui.novaVenda.dataPrevisaoPagamento = novaData;
       if (previsaoInput) previsaoInput.value = novaData;
+      if (previsaoSelecionada) previsaoSelecionada.textContent = `📅 ${formatDateOnly(novaData)}`;
     });
   });
   const descontoInput = document.getElementById("venda-desconto");
