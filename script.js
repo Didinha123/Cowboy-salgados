@@ -1019,6 +1019,19 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
   const valorRecebidoVista = vendasVista.reduce((sum, v) => sum + v.valorPago, 0);
   const valorRecebidoFiado = pagamentosPeriodo.reduce((sum, p) => sum + p.valor, 0);
 
+  // Desconto dado no período: os itens sempre guardam o valor de tabela
+  // (cadastrado), então a diferença entre a soma dos itens e o valor final
+  // da venda é exatamente o desconto aplicado — não precisa de um campo à
+  // parte pra isso, só comparar o que foi cadastrado com o que foi cobrado.
+  const catalogoPorVenda = new Map();
+  itensPeriodo.forEach((i) => {
+    catalogoPorVenda.set(i.vendaId, (catalogoPorVenda.get(i.vendaId) || 0) + i.valorTotal);
+  });
+  const descontoTotal = vendasPeriodo.reduce((sum, v) => {
+    const catalogo = catalogoPorVenda.get(v.id) || 0;
+    return sum + Math.max(0, Math.round((catalogo - v.valorTotal) * 100) / 100);
+  }, 0);
+
   return {
     periodo: { start, end },
     quantidadeVendas: vendasPeriodo.length,
@@ -1030,6 +1043,7 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
     valorRecebidoFiado,
     valorFiado,
     valorAindaAReceber,
+    descontoTotal,
     formasPagamento,
     vendas: vendasPeriodo,
   };
@@ -2140,6 +2154,7 @@ function renderRelatorio() {
         <li><span>💰 Recebido de fiado</span><strong>${formatCurrency(relatorio.valorRecebidoFiado)}</strong></li>
         <li><span>Valor vendido fiado</span><strong>${formatCurrency(relatorio.valorFiado)}</strong></li>
         <li><span>Ainda a receber (período)</span><strong>${formatCurrency(relatorio.valorAindaAReceber)}</strong></li>
+        <li><span>🏷️ Desconto dado</span><strong>${formatCurrency(relatorio.descontoTotal)}</strong></li>
       </ul>
 
       <h4 class="section-subtitle">Formas de pagamento</h4>
