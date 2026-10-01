@@ -976,3 +976,45 @@ select {
   font-weight: 700;
   color: var(--success);
 }
+
+/* ------------------------------ Filtro de turno ------------------------------ */
+
+.turno-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+}
+
+.turno-bar__label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--muted);
+  margin-right: 2px;
+}
+
+.turno-bar__btn {
+  flex: 1;
+  border: 1.5px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 7px 10px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.turno-bar__btn--ativo {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.stock-card__vendido {
+  margin: 4px 0 8px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
