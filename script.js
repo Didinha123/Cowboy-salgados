@@ -612,8 +612,8 @@ function getEstoque(produtoId) {
 }
 
 // Soma do que um cliente ainda deve (apenas vendas fiado com saldo em aberto).
-function calcularSaldoCliente(clienteId) {
-  return db.vendas
+function calcularSaldoCliente(clienteId, vendas = db.vendas) {
+  return vendas
     .filter((v) => v.clienteId === clienteId && v.formaPagamento === "fiado")
     .reduce((sum, v) => sum + v.valorRestante, 0);
 }
@@ -633,10 +633,10 @@ function totalPagoCliente(clienteId) {
 }
 
 // Status visual do cliente conforme legenda de emojis (seção 10 do briefing).
-function calcularStatusCliente(clienteId) {
-  const saldo = calcularSaldoCliente(clienteId);
+function calcularStatusCliente(clienteId, vendas = db.vendas) {
+  const saldo = calcularSaldoCliente(clienteId, vendas);
   if (saldo <= 0.004) return { emoji: "🟢", label: "Pago" };
-  const vendasFiado = db.vendas.filter((v) => v.clienteId === clienteId && v.formaPagamento === "fiado");
+  const vendasFiado = vendas.filter((v) => v.clienteId === clienteId && v.formaPagamento === "fiado");
   const houvePagamentoParcial = vendasFiado.some((v) => v.valorPago > 0);
   if (houvePagamentoParcial) return { emoji: "🟡", label: "Parcialmente pago" };
   return { emoji: "🔴", label: "Em aberto" };
@@ -670,9 +670,24 @@ function isVendaAtrasada(venda) {
   return daysBetween(venda.data) > 7; // vendas antigas sem previsão cadastrada
 }
 
+// Filtro de turno global (Todos / Manhã / Tarde), pelo horário do lançamento.
+// Só vale pra o que é exibido (painéis, listas, relatório) — as operações
+// (registrar pagamento, usar crédito, perfil do cliente) sempre veem tudo.
+function noTurno(iso) {
+  return ui.turno === "todos" || getCiclo(iso) === ui.turno;
+}
+
+function vendasDoTurno() {
+  return db.vendas.filter((v) => noTurno(v.data));
+}
+
+function pagamentosDoTurno() {
+  return db.pagamentos.filter((p) => noTurno(p.data));
+}
+
 function getVendasDoDia(referenceDate = new Date()) {
   const key = toDateKey(referenceDate);
-  return db.vendas.filter((v) => toDateKey(v.data) === key);
+  return vendasDoTurno().filter((v) => toDateKey(v.data) === key);
 }
 
 function getItensDeVenda(vendaId) {
@@ -700,26 +715,26 @@ function getAlertasEstoque() {
 // do que realmente foi.
 function getVistaHoje(referenceDate = new Date()) {
   const key = toDateKey(referenceDate);
-  return db.vendas
+  return vendasDoTurno()
     .filter((v) => v.formaPagamento !== "fiado" && toDateKey(v.data) === key)
     .reduce((sum, v) => sum + v.valorPago, 0);
 }
 
 function getRecebidoFiadoHoje(referenceDate = new Date()) {
   const key = toDateKey(referenceDate);
-  return db.pagamentos
+  return pagamentosDoTurno()
     .filter((p) => toDateKey(p.data) === key && p.vendaId !== CREDITO_USADO_ID)
     .reduce((sum, p) => sum + p.valor, 0);
 }
 
 function getFiadoEmAbertoTotal() {
-  return db.vendas.filter((v) => v.formaPagamento === "fiado").reduce((sum, v) => sum + v.valorRestante, 0);
+  return vendasDoTurno().filter((v) => v.formaPagamento === "fiado").reduce((sum, v) => sum + v.valorRestante, 0);
 }
 
 // Vendas fiado pendentes cuja data prevista de pagamento já passou (ou nunca
 // foi definida) — usado pro alerta gritante do painel Início.
 function getVendasFiadoAtrasadas() {
-  return db.vendas.filter((v) => v.formaPagamento === "fiado" && v.status !== "pago" && isVendaAtrasada(v));
+  return vendasDoTurno().filter((v) => v.formaPagamento === "fiado" && v.status !== "pago" && isVendaAtrasada(v));
 }
 
 /* ==========================================================================
@@ -1038,7 +1053,7 @@ function getPeriodoRange(filtro, customStart, customEnd) {
 function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
   const { clienteId, status } = opcoes;
   const { start, end } = getPeriodoRange(filtro, customStart, customEnd);
-  let vendasPeriodo = db.vendas.filter((v) => {
+  let vendasPeriodo = vendasDoTurno().filter((v) => {
     const d = new Date(v.data);
     return d >= start && d <= end;
   });
@@ -1049,7 +1064,7 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
   const idsVendas = new Set(vendasPeriodo.map((v) => v.id));
   const itensPeriodo = db.itensVenda.filter((i) => idsVendas.has(i.vendaId));
   // "Crédito usado" é só reaproveitar dinheiro que já entrou antes — não conta de novo.
-  let pagamentosPeriodo = db.pagamentos.filter((p) => {
+  let pagamentosPeriodo = pagamentosDoTurno().filter((p) => {
     const d = new Date(p.data);
     return d >= start && d <= end && p.vendaId !== CREDITO_USADO_ID;
   });
@@ -1118,6 +1133,7 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
 
 const ui = {
   viewAtual: "inicio",
+  turno: "todos", // filtro global: "todos" | "Manhã" | "Tarde"
   novaVenda: {
     step: 1,
     clienteId: null,
@@ -1501,6 +1517,7 @@ function renderClientes() {
 }
 
 function renderListaClientes() {
+  const vendasTurno = vendasDoTurno();
   const lista = filtrarClientes(ui.clientes.busca).slice().sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
   const ul = document.getElementById("clientes-lista");
 
@@ -1509,8 +1526,8 @@ function renderListaClientes() {
       ? `<li class="empty-state">Nenhum cliente encontrado.</li>`
       : lista
           .map((c) => {
-            const saldo = calcularSaldoCliente(c.id);
-            const status = calcularStatusCliente(c.id);
+            const saldo = calcularSaldoCliente(c.id, vendasTurno);
+            const status = calcularStatusCliente(c.id, vendasTurno);
             return `
             <li class="list-item" data-cliente-id="${c.id}">
               <div class="list-item__main">
@@ -1805,11 +1822,12 @@ function cobrarPeloWhatsApp(cliente) {
 
 function renderFiado() {
   const el = document.getElementById("view-fiado");
-  const clientesComHistorico = db.clientes.filter((c) => db.vendas.some((v) => v.clienteId === c.id && v.formaPagamento === "fiado"));
+  const vendasTurno = vendasDoTurno();
+  const clientesComHistorico = db.clientes.filter((c) => vendasTurno.some((v) => v.clienteId === c.id && v.formaPagamento === "fiado"));
 
   const totalAReceber = getFiadoEmAbertoTotal();
-  const clientesDevendo = clientesComHistorico.filter((c) => calcularSaldoCliente(c.id) > 0);
-  const emAtraso = clientesDevendo.filter((c) => db.vendas.some((v) => v.clienteId === c.id && isVendaAtrasada(v)));
+  const clientesDevendo = clientesComHistorico.filter((c) => calcularSaldoCliente(c.id, vendasTurno) > 0);
+  const emAtraso = clientesDevendo.filter((c) => vendasTurno.some((v) => v.clienteId === c.id && isVendaAtrasada(v)));
 
   const { buscaCliente, statusFiltro, periodoFiltro, customStart, customEnd, ordenacao } = ui.fiado;
 
@@ -1906,7 +1924,7 @@ function renderFiado() {
 function renderFiadoLista() {
   const { buscaCliente, statusFiltro, periodoFiltro, customStart, customEnd, ordenacao } = ui.fiado;
 
-  let vendasFiado = db.vendas.filter((v) => v.formaPagamento === "fiado");
+  let vendasFiado = vendasDoTurno().filter((v) => v.formaPagamento === "fiado");
   if (buscaCliente.trim()) {
     const termo = buscaCliente.trim().toLowerCase();
     const tDigits = onlyDigits(buscaCliente);
@@ -2003,6 +2021,14 @@ function abrirFormPrevisao(venda, onSaved = renderFiadoLista) {
 function renderEstoque() {
   const el = document.getElementById("view-estoque");
 
+  // Com um turno escolhido, mostra também quanto de cada produto saiu hoje
+  // nesse turno (o estoque em si é um só, não tem "estoque da manhã").
+  const idsVendasTurno = new Set(getVendasDoDia().map((v) => v.id));
+  const vendidoPorProduto = {};
+  db.itensVenda.forEach((i) => {
+    if (idsVendasTurno.has(i.vendaId)) vendidoPorProduto[i.produtoId] = (vendidoPorProduto[i.produtoId] || 0) + i.quantidade;
+  });
+
   el.innerHTML = `
     <h2 class="view-title">📦 Estoque</h2>
     <ul class="list">
@@ -2017,6 +2043,7 @@ function renderEstoque() {
               ${baixo ? `<span class="badge badge--danger">⚠️ ESTOQUE BAIXO</span>` : ""}
             </div>
             <p class="stock-card__qty">Estoque atual: <strong>${e.quantidadeAtual}</strong> <span class="stock-card__min">(mín. ${e.estoqueMinimo})</span></p>
+            ${ui.turno !== "todos" ? `<p class="stock-card__vendido">Vendido hoje na ${ui.turno === "Manhã" ? "manhã" : "tarde"}: <strong>${vendidoPorProduto[e.produtoId] || 0}</strong></p>` : ""}
             <div class="stock-card__actions">
               <button class="btn btn--small btn--secondary" data-action="entrada" data-produto="${e.produtoId}">➕ Entrada</button>
               <button class="btn btn--small btn--secondary" data-action="saida" data-produto="${e.produtoId}">➖ Saída</button>
@@ -2089,6 +2116,14 @@ function renderRelatorio() {
       <span></span>
     </div>
     <div class="overlay__body">
+      <div class="form-field">
+        <label for="relatorio-turno">Turno</label>
+        <select id="relatorio-turno">
+          <option value="todos" ${ui.turno === "todos" ? "selected" : ""}>Todos os turnos</option>
+          <option value="Manhã" ${ui.turno === "Manhã" ? "selected" : ""}>Manhã (antes das 12h)</option>
+          <option value="Tarde" ${ui.turno === "Tarde" ? "selected" : ""}>Tarde (12h em diante)</option>
+        </select>
+      </div>
       <div class="form-field">
         <label for="relatorio-filtro">Período</label>
         <select id="relatorio-filtro">
@@ -2188,6 +2223,7 @@ function renderRelatorio() {
   `;
 
   el.querySelector('[data-action="fechar-relatorio"]').addEventListener("click", () => closeOverlay("overlay-relatorio"));
+  document.getElementById("relatorio-turno").addEventListener("change", (e) => definirTurno(e.target.value));
   document.getElementById("relatorio-filtro").addEventListener("change", (e) => {
     ui.relatorio.filtro = e.target.value;
     renderRelatorio();
@@ -2705,6 +2741,37 @@ function confirmarNovaVenda() {
    20. INICIALIZAÇÃO
    ========================================================================== */
 
+// Barra de turno global, fixa logo abaixo do topo em todas as abas.
+function montarBarraTurno() {
+  const barra = document.createElement("div");
+  barra.id = "turno-bar";
+  barra.className = "turno-bar";
+  barra.innerHTML = `
+    <span class="turno-bar__label">Turno:</span>
+    <button type="button" class="turno-bar__btn" data-turno="todos">Todos</button>
+    <button type="button" class="turno-bar__btn" data-turno="Manhã">🌅 Manhã</button>
+    <button type="button" class="turno-bar__btn" data-turno="Tarde">🌇 Tarde</button>
+  `;
+  document.querySelector(".topbar").insertAdjacentElement("afterend", barra);
+  barra.querySelectorAll("[data-turno]").forEach((btn) => {
+    btn.addEventListener("click", () => definirTurno(btn.dataset.turno));
+  });
+  atualizarBarraTurno();
+}
+
+function atualizarBarraTurno() {
+  document.querySelectorAll("#turno-bar [data-turno]").forEach((btn) => {
+    btn.classList.toggle("turno-bar__btn--ativo", btn.dataset.turno === ui.turno);
+  });
+}
+
+function definirTurno(turno) {
+  ui.turno = turno;
+  atualizarBarraTurno();
+  renderView(ui.viewAtual);
+  if (!document.getElementById("overlay-relatorio").classList.contains("hidden")) renderRelatorio();
+}
+
 function initEventListeners() {
   document.querySelectorAll(".nav-btn").forEach((btn) => {
     btn.addEventListener("click", () => switchView(btn.dataset.view));
@@ -2727,6 +2794,7 @@ function init() {
   loadApiUrl();
   initDB();
   initEventListeners();
+  montarBarraTurno();
   switchView("inicio"); // renderiza imediatamente com os dados locais/em cache
   setSyncStatus(apiUrl ? "offline" : "offline");
   if (apiUrl) {
