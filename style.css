@@ -965,3 +965,14 @@ select {
     font-size: 1rem;
   }
 }
+
+.badge--credito {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.profile-card__credito {
+  margin: 6px 0 0;
+  font-weight: 700;
+  color: var(--success);
+}
