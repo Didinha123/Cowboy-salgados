@@ -20,7 +20,7 @@ const PRODUTO_IDS = {
 
 const FORMAS_PAGAMENTO_VISTA = [
   { id: "debito", label: "Débito", icon: "💳" },
-  { id: "credito", label: "Crédito", icon: "💳" },
+  { id: "credito", label: "Crédito (cartão)", icon: "💳" },
   { id: "pix", label: "PIX", icon: "📱" },
   { id: "dinheiro", label: "Dinheiro", icon: "💵" },
 ];
@@ -556,9 +556,14 @@ function addDays(date, n) {
 // Vencimentos fixos do negócio: dia 15, 20 ou 30 do mês. Devolve a próxima
 // ocorrência futura (se hoje já é o dia ou passou, vai pro mês seguinte).
 function proximoDiaFixo(dia) {
+  if (dia === "hoje") return toDateKey(new Date());
   const hoje = new Date();
   const mes = hoje.getDate() >= dia ? hoje.getMonth() + 1 : hoje.getMonth();
   return toDateKey(new Date(hoje.getFullYear(), mes, dia));
+}
+
+function diaFixoDoBotao(btn) {
+  return btn.dataset.diaFixo === "hoje" ? "hoje" : Number(btn.dataset.diaFixo);
 }
 
 // Data sugerida de largada: o vencimento fixo mais próximo.
@@ -717,13 +722,13 @@ function getVistaHoje(referenceDate = new Date()) {
   const key = toDateKey(referenceDate);
   return vendasDoTurno()
     .filter((v) => v.formaPagamento !== "fiado" && toDateKey(v.data) === key)
-    .reduce((sum, v) => sum + v.valorPago, 0);
+    .reduce((sum, v) => sum + valorEmDinheiro(v), 0);
 }
 
 function getRecebidoFiadoHoje(referenceDate = new Date()) {
   const key = toDateKey(referenceDate);
   return pagamentosDoTurno()
-    .filter((p) => toDateKey(p.data) === key && p.vendaId !== CREDITO_USADO_ID)
+    .filter((p) => toDateKey(p.data) === key && p.vendaId !== CREDITO_USADO_ID && p.vendaId !== CREDITO_ID)
     .reduce((sum, p) => sum + p.valor, 0);
 }
 
@@ -791,7 +796,7 @@ function excluirCliente(clienteId) {
 
 // Registra uma venda completa: cria a venda, os itens, abate o estoque
 // e (se fiado) já deixa o saldo devedor do cliente atualizado.
-function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagamento, desconto = 0 }) {
+function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagamento, desconto = 0, usarCredito = false, valorRecebido = null }) {
   const vendaId = generateId("venda");
   const data = new Date().toISOString(); // registra automaticamente data e hora da venda
 
@@ -805,8 +810,12 @@ function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagament
     return { id: generateId("item"), vendaId, produtoId: item.produtoId, quantidade: item.quantidade, valorTotal: valorItem };
   });
 
-  valorTotal = Math.max(0, Math.round((valorTotal - (desconto || 0)) * 100) / 100);
+  valorTotal = Math.max(0, arred2(valorTotal - (desconto || 0)));
   const isFiado = formaPagamento === "fiado";
+
+  // Caixa positivo do cliente: o crédito pode abater esta venda (à vista ou
+  // fiado), e se ele entregar MAIS do que precisa à vista, a sobra vira crédito.
+  const pg = calcularPagamentoVenda({ clienteId, totalFinal: valorTotal, usarCredito, valorRecebido, isFiado });
 
   const venda = {
     id: vendaId,
@@ -814,12 +823,21 @@ function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagament
     data,
     formaPagamento,
     valorTotal,
-    valorPago: isFiado ? 0 : valorTotal,
-    valorRestante: isFiado ? valorTotal : 0,
-    status: isFiado ? "aberto" : "pago",
+    valorPago: isFiado ? pg.creditoAplicado : valorTotal,
+    valorRestante: isFiado ? arred2(valorTotal - pg.creditoAplicado) : 0,
+    status: isFiado ? (valorTotal - pg.creditoAplicado <= 0.004 ? "pago" : pg.creditoAplicado > 0 ? "parcial" : "aberto") : "pago",
     dataPrevisaoPagamento: isFiado ? dataPrevisaoPagamento || null : null,
-    dataPagamento: null,
+    dataPagamento: isFiado && valorTotal - pg.creditoAplicado <= 0.004 ? data : null,
   };
+
+  const pagamentosExtras = [];
+  if (pg.creditoAplicado > 0) {
+    pagamentosExtras.push({ id: `pagcu-${vendaId}`, clienteId, vendaId: CREDITO_USADO_ID, valor: pg.creditoAplicado, formaPagamento: "credito", data });
+  }
+  if (pg.sobra > 0) {
+    pagamentosExtras.push({ id: `pagcr-${vendaId}`, clienteId, vendaId: CREDITO_ID, valor: pg.sobra, formaPagamento, data });
+  }
+  db.pagamentos.push(...pagamentosExtras);
 
   db.vendas.push(venda);
   db.itensVenda.push(...itensRegistrados);
@@ -832,13 +850,62 @@ function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagament
   saveDB();
 
   const produtosAfetados = [...new Set(itens.map((i) => i.produtoId))];
-  syncInBackground("registrarVenda", {
-    venda,
-    itens: itensRegistrados,
-    estoque: produtosAfetados.map((id) => getEstoque(id)),
-  });
+  syncSequencial([
+    ["registrarVenda", { venda, itens: itensRegistrados, estoque: produtosAfetados.map((id) => getEstoque(id)) }],
+    ...pagamentosExtras.map((row) => ["upsert", { sheet: "Pagamentos", row }]),
+  ]);
 
   return venda;
+}
+
+function arred2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+// Quanto do total sai do crédito do cliente, quanto ele ainda precisa pagar
+// agora, e quanto da entrega dele passa do necessário (vira crédito novo).
+function calcularPagamentoVenda({ clienteId, totalFinal, usarCredito, valorRecebido, isFiado }) {
+  const creditoDisponivel = clienteId === CLIENTE_AVULSO_ID ? 0 : getCreditoCliente(clienteId);
+  const creditoAplicado = usarCredito ? arred2(Math.min(creditoDisponivel, totalFinal)) : 0;
+  const aReceberAgora = arred2(totalFinal - creditoAplicado);
+  const sobra =
+    !isFiado && clienteId !== CLIENTE_AVULSO_ID && valorRecebido != null && valorRecebido > aReceberAgora
+      ? arred2(valorRecebido - aReceberAgora)
+      : 0;
+  return { creditoDisponivel, creditoAplicado, aReceberAgora, sobra };
+}
+
+// Da parte paga de uma venda, quanto foi pago com crédito (não é dinheiro novo).
+function creditoUsadoNaVenda(vendaId) {
+  const p = db.pagamentos.find((x) => x.id === `pagcu-${vendaId}`);
+  return p ? p.valor : 0;
+}
+
+// Dinheiro/cartão que realmente entrou numa venda à vista (sem a parte do crédito).
+function valorEmDinheiro(v) {
+  return Math.max(0, arred2(v.valorPago - creditoUsadoNaVenda(v.id)));
+}
+
+function getCreditoRecebidoHoje(referenceDate = new Date()) {
+  const key = toDateKey(referenceDate);
+  return pagamentosDoTurno()
+    .filter((p) => toDateKey(p.data) === key && p.vendaId === CREDITO_ID)
+    .reduce((sum, p) => sum + p.valor, 0);
+}
+
+// Soma do saldo positivo de todos os clientes (o "caixa positivo" total).
+function getCreditoTotalEmCaixa() {
+  const soma = (marca) => db.pagamentos.filter((p) => p.vendaId === marca).reduce((s, p) => s + p.valor, 0);
+  return Math.max(0, arred2(soma(CREDITO_ID) - soma(CREDITO_USADO_ID)));
+}
+
+// Entrada de crédito a qualquer momento (adiantamento/depósito), sem precisar de venda.
+function adicionarCreditoCliente(clienteId, valor, formaPagamento) {
+  const row = { id: generateId("pag"), clienteId, vendaId: CREDITO_ID, valor: arred2(valor), formaPagamento, data: new Date().toISOString() };
+  db.pagamentos.push(row);
+  saveDB();
+  syncSequencial([["upsert", { sheet: "Pagamentos", row }]]);
+  return row;
 }
 
 // Marcas usadas na coluna "vendaId" da aba Pagamentos pra guardar o saldo
@@ -966,18 +1033,20 @@ function excluirVenda(vendaId) {
     }
   });
 
+  // Crédito usado/sobra gerada NESSA venda voltam ao que eram antes dela.
+  const pagamentosLigados = db.pagamentos.filter((p) => p.id === `pagcu-${vendaId}` || p.id === `pagcr-${vendaId}`);
+  db.pagamentos = db.pagamentos.filter((p) => !pagamentosLigados.includes(p));
+
   db.itensVenda = db.itensVenda.filter((i) => i.vendaId !== vendaId);
   db.vendas = db.vendas.filter((v) => v.id !== vendaId);
   saveDB();
 
-  // Um único pedido (em vez de vários em paralelo) — o Apps Script não
-  // garante ordem/atomicidade entre chamadas concorrentes na mesma aba, o
-  // que podia deixar itens ou a venda sem excluir na planilha.
-  syncInBackground("excluirVenda", {
-    vendaId,
-    itemIds: itens.map((i) => i.id),
-    estoque: estoquesAfetados,
-  });
+  // Em sequência (esperando cada uma): o Apps Script não garante ordem/atomicidade
+  // entre chamadas concorrentes na mesma aba.
+  syncSequencial([
+    ["excluirVenda", { vendaId, itemIds: itens.map((i) => i.id), estoque: estoquesAfetados }],
+    ...pagamentosLigados.map((p) => ["deletar", { sheet: "Pagamentos", id: p.id }]),
+  ]);
 }
 
 function ajustarEstoque(produtoId, tipoOperacao, quantidade) {
@@ -1063,10 +1132,9 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
 
   const idsVendas = new Set(vendasPeriodo.map((v) => v.id));
   const itensPeriodo = db.itensVenda.filter((i) => idsVendas.has(i.vendaId));
-  // "Crédito usado" é só reaproveitar dinheiro que já entrou antes — não conta de novo.
   let pagamentosPeriodo = pagamentosDoTurno().filter((p) => {
     const d = new Date(p.data);
-    return d >= start && d <= end && p.vendaId !== CREDITO_USADO_ID;
+    return d >= start && d <= end;
   });
   if (clienteId) pagamentosPeriodo = pagamentosPeriodo.filter((p) => p.clienteId === clienteId);
 
@@ -1076,9 +1144,12 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
   const vendasVista = vendasPeriodo.filter((v) => v.formaPagamento !== "fiado");
   const vendasFiado = vendasPeriodo.filter((v) => v.formaPagamento === "fiado");
 
-  const formasPagamento = { pix: 0, dinheiro: 0, debito: 0, credito: 0 };
+  // "saldo" = parte da venda paga com o crédito do cliente (não é dinheiro novo).
+  const formasPagamento = { pix: 0, dinheiro: 0, debito: 0, credito: 0, saldo: 0 };
   vendasVista.forEach((v) => {
-    formasPagamento[v.formaPagamento] = (formasPagamento[v.formaPagamento] || 0) + v.valorTotal;
+    const emDinheiro = valorEmDinheiro(v);
+    if (emDinheiro > 0) formasPagamento[v.formaPagamento] = (formasPagamento[v.formaPagamento] || 0) + emDinheiro;
+    formasPagamento.saldo += arred2(v.valorPago - emDinheiro);
   });
 
   const faturamentoTotal = vendasPeriodo.reduce((sum, v) => sum + v.valorTotal, 0);
@@ -1086,8 +1157,13 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
   const valorAindaAReceber = vendasFiado.reduce((sum, v) => sum + v.valorRestante, 0);
   // Separados de propósito: "à vista" é dinheiro que entra na hora da venda;
   // "recebido fiado" é dívida antiga sendo paga agora — não é a mesma coisa.
-  const valorRecebidoVista = vendasVista.reduce((sum, v) => sum + v.valorPago, 0);
-  const valorRecebidoFiado = pagamentosPeriodo.reduce((sum, p) => sum + p.valor, 0);
+  // Crédito não entra como "recebido de fiado": sobra/depósito vira "crédito
+  // recebido" (caixa positivo) e o crédito usado só reaproveita dinheiro antigo.
+  const valorRecebidoVista = vendasVista.reduce((sum, v) => sum + valorEmDinheiro(v), 0);
+  const soma = (lista) => lista.reduce((sum, p) => sum + p.valor, 0);
+  const valorRecebidoFiado = soma(pagamentosPeriodo.filter((p) => p.vendaId !== CREDITO_ID && p.vendaId !== CREDITO_USADO_ID));
+  const creditoRecebido = soma(pagamentosPeriodo.filter((p) => p.vendaId === CREDITO_ID));
+  const creditoUsado = soma(pagamentosPeriodo.filter((p) => p.vendaId === CREDITO_USADO_ID));
 
   // Desconto dado no período: os itens sempre guardam o valor de tabela
   // (cadastrado), então a diferença entre a soma dos itens e o valor final
@@ -1119,6 +1195,8 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
     faturamentoTotal,
     valorRecebidoVista,
     valorRecebidoFiado,
+    creditoRecebido,
+    creditoUsado,
     valorFiado,
     valorAindaAReceber,
     descontoTotal,
@@ -1143,6 +1221,8 @@ const ui = {
     buscaCliente: "",
     dataPrevisaoPagamento: null,
     desconto: 0,
+    usarCredito: false,
+    valorRecebido: null,
   },
   clientes: { busca: "" },
   venda: { clienteFiltro: "" },
@@ -1168,6 +1248,8 @@ function resetNovaVendaState() {
     buscaCliente: "",
     dataPrevisaoPagamento: null,
     desconto: 0,
+    usarCredito: false,
+    valorRecebido: null,
   };
 }
 
@@ -1303,6 +1385,8 @@ function renderDashboard() {
   const fiadoAberto = getFiadoEmAbertoTotal();
   const vistaHoje = getVistaHoje();
   const recebidoFiadoHoje = getRecebidoFiadoHoje();
+  const creditoRecebidoHoje = getCreditoRecebidoHoje();
+  const creditoEmCaixa = getCreditoTotalEmCaixa();
   const alertas = getAlertasEstoque();
   const fiadoAtrasado = getVendasFiadoAtrasadas();
 
@@ -1346,6 +1430,20 @@ function renderDashboard() {
       <div class="stat-box"><span>💵 À vista hoje</span><strong>${formatCurrency(vistaHoje)}</strong></div>
       <div class="stat-box"><span>💰 Recebido (fiado)</span><strong>${formatCurrency(recebidoFiadoHoje)}</strong></div>
     </div>
+    ${
+      creditoEmCaixa > 0 || creditoRecebidoHoje > 0
+        ? `<div class="dash-grid">
+            <div class="dash-card dash-card--success">
+              <span class="dash-card__label">Crédito recebido hoje</span>
+              <span class="dash-card__value">💚 ${formatCurrency(creditoRecebidoHoje)}</span>
+            </div>
+            <div class="dash-card dash-card--success">
+              <span class="dash-card__label">Crédito em caixa (clientes)</span>
+              <span class="dash-card__value">💚 ${formatCurrency(creditoEmCaixa)}</span>
+            </div>
+          </div>`
+        : ""
+    }
 
     ${
       fiadoAtrasado.length > 0
@@ -1620,6 +1718,7 @@ function renderPerfilCliente() {
       <div class="profile-actions">
         <button class="btn btn--secondary btn--block" data-action="nova-venda-cliente">🛒 Nova venda pra este cliente</button>
         <button class="btn btn--primary btn--block" data-action="registrar-pagamento" ${saldo <= 0 ? "disabled" : ""}>💰 Registrar pagamento</button>
+        ${cliente.fixo ? "" : `<button class="btn btn--secondary btn--block" data-action="adicionar-credito">💚 Adicionar crédito (adiantamento)</button>`}
         ${credito > 0 && saldo > 0 ? `<button class="btn btn--secondary btn--block" data-action="usar-credito">💚 Usar crédito (${formatCurrency(Math.min(credito, saldo))}) na dívida</button>` : ""}
         <button class="btn btn--whatsapp btn--block" data-action="cobrar-whatsapp" ${!cliente.telefone ? "disabled" : ""}>📱 Cobrar pelo WhatsApp</button>
       </div>
@@ -1690,6 +1789,7 @@ function renderPerfilCliente() {
     startNovaVendaParaCliente(cliente.id);
   });
   el.querySelector('[data-action="registrar-pagamento"]').addEventListener("click", () => abrirFormPagamento(cliente));
+  el.querySelector('[data-action="adicionar-credito"]')?.addEventListener("click", () => abrirFormCredito(cliente));
   el.querySelector('[data-action="usar-credito"]')?.addEventListener("click", () => {
     const usado = usarCreditoCliente(cliente.id);
     showToast(`💚 ${formatCurrency(usado)} de crédito abatido da dívida.`);
@@ -1751,6 +1851,38 @@ function confirmarExcluirCliente(cliente) {
   });
 }
 
+// Caixa positivo: o cliente deixa dinheiro adiantado, sem precisar de venda.
+function abrirFormCredito(cliente) {
+  openPrompt({
+    title: "💚 Adicionar crédito",
+    fields: [
+      { id: "valor", label: `Valor que ${cliente.nome} está deixando de crédito`, type: "number", inputmode: "decimal", step: "0.01", placeholder: "0,00" },
+      {
+        id: "forma",
+        label: "Forma de pagamento",
+        type: "select",
+        options: [
+          { value: "pix", label: "PIX" },
+          { value: "dinheiro", label: "Dinheiro" },
+          { value: "debito", label: "Débito" },
+          { value: "credito", label: "Crédito (cartão)" },
+        ],
+      },
+    ],
+    confirmText: "Adicionar",
+    onSubmit: (values) => {
+      if (values.valor <= 0) {
+        showToast("Informe um valor válido.");
+        return;
+      }
+      adicionarCreditoCliente(cliente.id, values.valor, values.forma);
+      showToast(`💚 ${formatCurrency(values.valor)} de crédito adicionado.`);
+      renderPerfilCliente();
+      if (ui.viewAtual === "inicio") renderView("inicio");
+    },
+  });
+}
+
 function abrirFormPagamento(cliente) {
   const saldo = calcularSaldoCliente(cliente.id);
   openPrompt({
@@ -1765,7 +1897,7 @@ function abrirFormPagamento(cliente) {
           { value: "pix", label: "PIX" },
           { value: "dinheiro", label: "Dinheiro" },
           { value: "debito", label: "Débito" },
-          { value: "credito", label: "Crédito" },
+          { value: "credito", label: "Crédito (cartão)" },
         ],
       },
     ],
@@ -1851,13 +1983,13 @@ function renderFiado() {
         </select>
       </div>
       <div class="form-field">
-        <label for="fiado-filtro-periodo">Período</label>
+        <label for="fiado-filtro-periodo">Data prevista</label>
         <select id="fiado-filtro-periodo">
-          <option value="todos" ${periodoFiltro === "todos" ? "selected" : ""}>Todo o período</option>
-          <option value="hoje" ${periodoFiltro === "hoje" ? "selected" : ""}>Hoje</option>
-          <option value="esta-semana" ${periodoFiltro === "esta-semana" ? "selected" : ""}>Esta semana</option>
-          <option value="semana-passada" ${periodoFiltro === "semana-passada" ? "selected" : ""}>Semana passada</option>
-          <option value="mes" ${periodoFiltro === "mes" ? "selected" : ""}>Este mês</option>
+          <option value="todos" ${periodoFiltro === "todos" ? "selected" : ""}>Todas as datas</option>
+          <option value="vencidos" ${periodoFiltro === "vencidos" ? "selected" : ""}>Vencidos (atrasados)</option>
+          <option value="hoje" ${periodoFiltro === "hoje" ? "selected" : ""}>Vence hoje</option>
+          <option value="esta-semana" ${periodoFiltro === "esta-semana" ? "selected" : ""}>Vence esta semana</option>
+          <option value="mes" ${periodoFiltro === "mes" ? "selected" : ""}>Vence este mês</option>
           <option value="personalizado" ${periodoFiltro === "personalizado" ? "selected" : ""}>Personalizado</option>
         </select>
       </div>
@@ -1874,7 +2006,8 @@ function renderFiado() {
     <div class="form-field">
       <label for="fiado-ordenacao">Ordenar por</label>
       <select id="fiado-ordenacao">
-        <option value="previsao-proxima" ${ordenacao === "previsao-proxima" ? "selected" : ""}>Data prevista (mais próxima)</option>
+        <option value="previsao-proxima" ${ordenacao === "previsao-proxima" ? "selected" : ""}>Data prevista (mais próxima primeiro)</option>
+        <option value="previsao-distante" ${ordenacao === "previsao-distante" ? "selected" : ""}>Data prevista (mais distante primeiro)</option>
         <option value="venda-recente" ${ordenacao === "venda-recente" ? "selected" : ""}>Data da venda (mais recentes)</option>
         <option value="venda-antiga" ${ordenacao === "venda-antiga" ? "selected" : ""}>Data da venda (mais antigas)</option>
         <option value="valor" ${ordenacao === "valor" ? "selected" : ""}>Valor (maior primeiro)</option>
@@ -1921,6 +2054,25 @@ function renderFiado() {
   });
 }
 
+// Faixa de datas (vencimentos) do filtro "Data prevista" da aba Fiado.
+function getFaixaPrevisao(filtro, customStart, customEnd) {
+  const hoje = new Date();
+  hoje.setHours(0, 0, 0, 0);
+  if (filtro === "hoje") return { start: hoje, end: new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate(), 23, 59, 59, 999) };
+  if (filtro === "esta-semana") {
+    const start = getMondayOfWeek(hoje);
+    const fim = addDays(start, 6);
+    return { start, end: new Date(fim.getFullYear(), fim.getMonth(), fim.getDate(), 23, 59, 59, 999) };
+  }
+  if (filtro === "mes") {
+    return { start: new Date(hoje.getFullYear(), hoje.getMonth(), 1), end: new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0, 23, 59, 59, 999) };
+  }
+  return {
+    start: new Date(`${customStart || toDateKey(hoje)}T00:00:00`),
+    end: new Date(`${customEnd || toDateKey(hoje)}T23:59:59.999`),
+  };
+}
+
 function renderFiadoLista() {
   const { buscaCliente, statusFiltro, periodoFiltro, customStart, customEnd, ordenacao } = ui.fiado;
 
@@ -1934,58 +2086,81 @@ function renderFiadoLista() {
     });
   }
   if (statusFiltro) vendasFiado = vendasFiado.filter((v) => getStatusPagamento(v).code === statusFiltro);
-  if (periodoFiltro && periodoFiltro !== "todos") {
-    const { start, end } = getPeriodoRange(periodoFiltro, customStart, customEnd);
+  // O filtro de período agora é pela DATA PREVISTA de pagamento (vencimento),
+  // não pela data em que a venda foi feita.
+  if (periodoFiltro === "vencidos") {
+    vendasFiado = vendasFiado.filter((v) => v.status !== "pago" && isVendaAtrasada(v));
+  } else if (periodoFiltro && periodoFiltro !== "todos") {
+    const { start, end } = getFaixaPrevisao(periodoFiltro, customStart, customEnd);
     vendasFiado = vendasFiado.filter((v) => {
-      const d = new Date(v.data);
+      if (!v.dataPrevisaoPagamento) return false;
+      const d = new Date(`${v.dataPrevisaoPagamento}T00:00:00`);
       return d >= start && d <= end;
     });
   }
 
-  vendasFiado = [...vendasFiado].sort((a, b) => {
-    const nomeA = getCliente(a.clienteId)?.nome || "";
-    const nomeB = getCliente(b.clienteId)?.nome || "";
-    if (ordenacao === "cliente-az") return nomeA.localeCompare(nomeB, "pt-BR");
-    if (ordenacao === "cliente-za") return nomeB.localeCompare(nomeA, "pt-BR");
-    if (ordenacao === "venda-recente") return new Date(b.data) - new Date(a.data);
-    if (ordenacao === "venda-antiga") return new Date(a.data) - new Date(b.data);
-    if (ordenacao === "valor") return b.valorTotal - a.valorTotal;
-    if (ordenacao === "status") return getStatusPagamento(a).label.localeCompare(getStatusPagamento(b).label);
-    if (ordenacao === "previsao-proxima") {
-      if (!a.dataPrevisaoPagamento && !b.dataPrevisaoPagamento) return 0;
-      if (!a.dataPrevisaoPagamento) return 1;
-      if (!b.dataPrevisaoPagamento) return -1;
-      return new Date(a.dataPrevisaoPagamento) - new Date(b.dataPrevisaoPagamento);
-    }
-    return new Date(b.data) - new Date(a.data);
-  });
-
   const ul = document.getElementById("fiado-lista");
 
-  // Um registro por cliente (agrupado pelo id, não pela vizinhança na lista):
-  // só o nome e o total acumulado — o detalhe de cada venda fica no perfil.
+  // Um registro por cliente (agrupado pelo id): só o nome e o total acumulado —
+  // o detalhe de cada venda fica no perfil. A ordenação vale pro cliente todo.
   const grupos = new Map();
   vendasFiado.forEach((v) => {
     if (!grupos.has(v.clienteId)) grupos.set(v.clienteId, []);
     grupos.get(v.clienteId).push(v);
   });
 
+  const entradas = [...grupos.entries()].map(([clienteId, vendas]) => {
+    const pendentes = vendas.filter((v) => v.status !== "pago");
+    const datas = pendentes.map((v) => v.dataPrevisaoPagamento).filter(Boolean).sort();
+    const datasVendas = vendas.map((v) => v.data).sort();
+    return {
+      clienteId,
+      vendas,
+      pendentes,
+      datas,
+      nome: getCliente(clienteId)?.nome || "Cliente",
+      emAberto: pendentes.reduce((sum, v) => sum + v.valorRestante, 0),
+      primeiraVenda: datasVendas[0],
+      ultimaVenda: datasVendas[datasVendas.length - 1],
+    };
+  });
+
+  // Quem não tem data prevista vai sempre pro fim nas ordenações por data.
+  const porData = (a, b, pegar, sentido) => {
+    const da = pegar(a);
+    const dataB = pegar(b);
+    if (!da && !dataB) return 0;
+    if (!da) return 1;
+    if (!dataB) return -1;
+    return da < dataB ? -sentido : da > dataB ? sentido : 0;
+  };
+  entradas.sort((a, b) => {
+    if (ordenacao === "previsao-distante") return porData(a, b, (e) => e.datas[e.datas.length - 1], -1);
+    if (ordenacao === "cliente-az") return a.nome.localeCompare(b.nome, "pt-BR");
+    if (ordenacao === "cliente-za") return b.nome.localeCompare(a.nome, "pt-BR");
+    if (ordenacao === "venda-recente") return new Date(b.ultimaVenda) - new Date(a.ultimaVenda);
+    if (ordenacao === "venda-antiga") return new Date(a.primeiraVenda) - new Date(b.primeiraVenda);
+    if (ordenacao === "valor") return b.emAberto - a.emAberto;
+    if (ordenacao === "status") return b.pendentes.length - a.pendentes.length;
+    return porData(a, b, (e) => e.datas[0], 1); // "previsao-proxima" (padrão)
+  });
+
   ul.innerHTML =
-    grupos.size === 0
+    entradas.length === 0
       ? `<li class="empty-state">Nenhuma venda fiado encontrada com esses filtros.</li>`
-      : [...grupos.entries()]
-          .map(([clienteId, vendas]) => {
-            const cliente = getCliente(clienteId);
-            const pendentes = vendas.filter((v) => v.status !== "pago");
-            const emAberto = pendentes.reduce((sum, v) => sum + v.valorRestante, 0);
+      : entradas
+          .map(({ clienteId, vendas, pendentes, datas, nome, emAberto }) => {
             const atrasado = pendentes.some((v) => isVendaAtrasada(v));
-            const datas = pendentes.map((v) => v.dataPrevisaoPagamento).filter(Boolean).sort();
-            const proximoVencimento = datas.length ? `Vence em ${formatDateOnly(datas[0])}` : pendentes.length ? "Sem data prevista" : "";
+            const vencimento = datas.length
+              ? `Vence em ${formatDateOnly(datas[0])}${datas[datas.length - 1] !== datas[0] ? ` · até ${formatDateOnly(datas[datas.length - 1])}` : ""}`
+              : pendentes.length
+                ? "Sem data prevista"
+                : "";
             return `
             <li class="list-item" data-action="abrir-cliente" data-cliente-id="${clienteId}">
               <div class="list-item__main">
-                <strong>${cliente ? cliente.nome : "Cliente"}</strong>
-                ${proximoVencimento ? `<span class="list-item__meta">${proximoVencimento}</span>` : ""}
+                <strong>${nome}</strong>
+                ${vencimento ? `<span class="list-item__meta">${vencimento}</span>` : ""}
               </div>
               <div class="list-item__side">
                 <span class="list-item__value-label">${pendentes.length ? "Falta pagar" : "Total pago"}</span>
@@ -2001,6 +2176,21 @@ function renderFiadoLista() {
   });
 }
 
+// Botões Hoje / Dia 15 / Dia 20 / Dia 30 acima de um campo de data.
+function adicionarAtalhosData(input) {
+  const barra = document.createElement("div");
+  barra.className = "date-presets";
+  barra.innerHTML = ["hoje", 15, 20, 30]
+    .map((d) => `<button type="button" class="btn btn--small btn--secondary" data-dia-fixo="${d}">${d === "hoje" ? "Hoje" : `Dia ${d}`}</button>`)
+    .join("");
+  input.insertAdjacentElement("beforebegin", barra);
+  barra.querySelectorAll("button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      input.value = proximoDiaFixo(diaFixoDoBotao(btn));
+    });
+  });
+}
+
 function abrirFormPrevisao(venda, onSaved = renderFiadoLista) {
   openPrompt({
     title: "Data prevista de pagamento",
@@ -2012,6 +2202,7 @@ function abrirFormPrevisao(venda, onSaved = renderFiadoLista) {
       onSaved();
     },
   });
+  adicionarAtalhosData(document.getElementById("prompt-data"));
 }
 
 /* ==========================================================================
@@ -2186,6 +2377,8 @@ function renderRelatorio() {
         <li><span>💰 Recebido de fiado</span><strong>${formatCurrency(relatorio.valorRecebidoFiado)}</strong></li>
         <li><span>Valor vendido fiado</span><strong>${formatCurrency(relatorio.valorFiado)}</strong></li>
         <li><span>Ainda a receber (período)</span><strong>${formatCurrency(relatorio.valorAindaAReceber)}</strong></li>
+        <li><span>💚 Crédito recebido (sobras e depósitos)</span><strong>${formatCurrency(relatorio.creditoRecebido)}</strong></li>
+        <li><span>💚 Crédito usado</span><strong>${formatCurrency(relatorio.creditoUsado)}</strong></li>
         <li><span>🏷️ Desconto dado</span><strong>${formatCurrency(relatorio.descontoTotal)}</strong></li>
       </ul>
 
@@ -2194,7 +2387,8 @@ function renderRelatorio() {
         <li><span>📱 PIX</span><strong>${formatCurrency(relatorio.formasPagamento.pix)}</strong></li>
         <li><span>💵 Dinheiro</span><strong>${formatCurrency(relatorio.formasPagamento.dinheiro)}</strong></li>
         <li><span>💳 Débito</span><strong>${formatCurrency(relatorio.formasPagamento.debito)}</strong></li>
-        <li><span>💳 Crédito</span><strong>${formatCurrency(relatorio.formasPagamento.credito)}</strong></li>
+        <li><span>💳 Cartão de crédito</span><strong>${formatCurrency(relatorio.formasPagamento.credito)}</strong></li>
+        <li><span>💚 Saldo do cliente (crédito)</span><strong>${formatCurrency(relatorio.formasPagamento.saldo)}</strong></li>
         <li><span>🔵 Fiado</span><strong>${formatCurrency(relatorio.valorFiado)}</strong></li>
       </ul>
 
@@ -2611,9 +2805,18 @@ function renderPassoPagamento() {
     ui.novaVenda.dataPrevisaoPagamento = dataPrevisaoPadrao();
   }
 
-  const podeConfirmar = forma === "fiado" || (forma === "vista" && metodo);
   const desconto = Math.min(total, Math.max(0, ui.novaVenda.desconto || 0));
   const totalComDesconto = Math.round((total - desconto) * 100) / 100;
+  const creditoDisponivel = isAvulso ? 0 : getCreditoCliente(cliente.id);
+  const pgAtual = calcularPagamentoVenda({
+    clienteId: cliente.id,
+    totalFinal: totalComDesconto,
+    usarCredito: ui.novaVenda.usarCredito,
+    valorRecebido: ui.novaVenda.valorRecebido,
+    isFiado: forma === "fiado",
+  });
+  // Se o crédito cobre a venda toda, não precisa escolher forma de pagamento.
+  const podeConfirmar = forma === "fiado" || (forma === "vista" && (metodo || pgAtual.aReceberAgora <= 0.004));
 
   el.innerHTML = `
     ${stepHeader("Forma de pagamento", true)}
@@ -2646,11 +2849,29 @@ function renderPassoPagamento() {
       }
 
       ${
+        forma && creditoDisponivel > 0
+          ? `<label class="check-row"><input type="checkbox" id="venda-usar-credito" ${ui.novaVenda.usarCredito ? "checked" : ""} /> 💚 Usar crédito do cliente (${formatCurrency(creditoDisponivel)} disponível)</label>`
+          : ""
+      }
+
+      ${
+        forma === "vista" && !isAvulso
+          ? `<div class="form-field">
+              <label for="venda-valor-recebido">Valor recebido (R$, opcional)</label>
+              <input type="number" id="venda-valor-recebido" inputmode="decimal" step="0.01" min="0" placeholder="Se passar do necessário, a sobra vira crédito" value="${ui.novaVenda.valorRecebido ?? ""}" />
+            </div>`
+          : ""
+      }
+
+      <p class="pagamento-resumo hidden" id="venda-resumo-pagamento"></p>
+
+      ${
         forma === "fiado"
           ? `<div class="form-field">
               <label for="venda-data-previsao">Data prevista de pagamento</label>
               <p class="date-selected" id="venda-data-selecionada">📅 ${formatDateOnly(ui.novaVenda.dataPrevisaoPagamento)}</p>
               <div class="date-presets">
+                <button type="button" class="btn btn--small btn--secondary" data-dia-fixo="hoje">Hoje</button>
                 <button type="button" class="btn btn--small btn--secondary" data-dia-fixo="15">Dia 15</button>
                 <button type="button" class="btn btn--small btn--secondary" data-dia-fixo="20">Dia 20</button>
                 <button type="button" class="btn btn--small btn--secondary" data-dia-fixo="30">Dia 30</button>
@@ -2697,7 +2918,7 @@ function renderPassoPagamento() {
   // alguns aparelhos não abre ou não mostra a data direito).
   el.querySelectorAll("[data-dia-fixo]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const novaData = proximoDiaFixo(Number(btn.dataset.diaFixo));
+      const novaData = proximoDiaFixo(diaFixoDoBotao(btn));
       ui.novaVenda.dataPrevisaoPagamento = novaData;
       if (previsaoInput) previsaoInput.value = novaData;
       if (previsaoSelecionada) previsaoSelecionada.textContent = `📅 ${formatDateOnly(novaData)}`;
@@ -2709,27 +2930,82 @@ function renderPassoPagamento() {
       const valor = Math.min(total, Math.max(0, parseFloat(e.target.value.replace(",", ".")) || 0));
       ui.novaVenda.desconto = valor;
       document.getElementById("venda-total-valor").textContent = formatCurrency(Math.round((total - valor) * 100) / 100);
+      atualizarResumoNovaVenda();
     });
   }
+  document.getElementById("venda-usar-credito")?.addEventListener("change", (e) => {
+    ui.novaVenda.usarCredito = e.target.checked;
+    renderPassoPagamento();
+  });
+  document.getElementById("venda-valor-recebido")?.addEventListener("input", (e) => {
+    const bruto = e.target.value.replace(",", ".");
+    ui.novaVenda.valorRecebido = bruto === "" ? null : parseFloat(bruto) || 0;
+    atualizarResumoNovaVenda();
+  });
+  atualizarResumoNovaVenda();
   const confirmarBtn = document.getElementById("venda-confirmar-btn");
   if (confirmarBtn) {
     confirmarBtn.addEventListener("click", confirmarNovaVenda);
   }
 }
 
+// Resumo ao vivo do passo de pagamento: crédito usado, quanto receber agora e
+// quanto da entrega do cliente vira crédito.
+function atualizarResumoNovaVenda() {
+  const el = document.getElementById("venda-resumo-pagamento");
+  if (!el) return;
+  const { total } = calcularCarrinho();
+  const desconto = Math.min(total, Math.max(0, ui.novaVenda.desconto || 0));
+  const totalFinal = arred2(total - desconto);
+  const forma = ui.novaVenda.formaPagamento;
+  const pg = calcularPagamentoVenda({
+    clienteId: ui.novaVenda.clienteId,
+    totalFinal,
+    usarCredito: ui.novaVenda.usarCredito,
+    valorRecebido: ui.novaVenda.valorRecebido,
+    isFiado: forma === "fiado",
+  });
+  const linhas = [];
+  if (pg.creditoAplicado > 0) linhas.push(`💚 Crédito usado: <strong>${formatCurrency(pg.creditoAplicado)}</strong>`);
+  if (forma === "vista" && pg.creditoAplicado > 0) linhas.push(`Receber agora: <strong>${formatCurrency(pg.aReceberAgora)}</strong>`);
+  if (forma === "fiado" && pg.creditoAplicado > 0) linhas.push(`Fica devendo: <strong>${formatCurrency(arred2(totalFinal - pg.creditoAplicado))}</strong>`);
+  if (pg.sobra > 0) linhas.push(`💚 Sobra de <strong>${formatCurrency(pg.sobra)}</strong> vira crédito do cliente`);
+  const recebido = ui.novaVenda.valorRecebido;
+  if (forma === "vista" && recebido != null && recebido < pg.aReceberAgora - 0.004) {
+    linhas.push(`<span class="texto-erro">⚠️ O valor recebido é menor que ${formatCurrency(pg.aReceberAgora)}</span>`);
+  }
+  el.innerHTML = linhas.join("<br>");
+  el.classList.toggle("hidden", linhas.length === 0);
+}
+
 function confirmarNovaVenda() {
   const { itens, total } = calcularCarrinho();
   if (total <= 0) return;
 
-  const formaPagamentoFinal = ui.novaVenda.formaPagamento === "fiado" ? "fiado" : ui.novaVenda.metodoVista;
+  const isFiado = ui.novaVenda.formaPagamento === "fiado";
+  const formaPagamentoFinal = isFiado ? "fiado" : ui.novaVenda.metodoVista || "saldo";
   const desconto = Math.min(total, Math.max(0, ui.novaVenda.desconto || 0));
+  const totalFinal = arred2(total - desconto);
+  const pg = calcularPagamentoVenda({
+    clienteId: ui.novaVenda.clienteId,
+    totalFinal,
+    usarCredito: ui.novaVenda.usarCredito,
+    valorRecebido: ui.novaVenda.valorRecebido,
+    isFiado,
+  });
+  if (!isFiado && ui.novaVenda.valorRecebido != null && ui.novaVenda.valorRecebido < pg.aReceberAgora - 0.004) {
+    showToast(`O valor recebido é menor que ${formatCurrency(pg.aReceberAgora)}.`);
+    return;
+  }
 
   registrarVenda({
     clienteId: ui.novaVenda.clienteId,
     itens: itens.map((i) => ({ produtoId: i.produtoId, quantidade: i.quantidade })),
     formaPagamento: formaPagamentoFinal,
-    dataPrevisaoPagamento: ui.novaVenda.formaPagamento === "fiado" ? ui.novaVenda.dataPrevisaoPagamento : null,
+    dataPrevisaoPagamento: isFiado ? ui.novaVenda.dataPrevisaoPagamento : null,
     desconto,
+    usarCredito: ui.novaVenda.usarCredito,
+    valorRecebido: ui.novaVenda.valorRecebido,
   });
 
   showToast(`Venda de ${formatCurrency(total - desconto)} registrada!`);
