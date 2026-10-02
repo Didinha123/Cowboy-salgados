@@ -939,6 +939,37 @@ function ajustarCreditoCliente(clienteId, delta) {
   return cliente;
 }
 
+// Corrige um crédito lançado por engano: tira "valor" do saldo e também das
+// entradas de crédito mais recentes do histórico (assim os relatórios deixam
+// de contar esse valor como crédito recebido). Devolve quanto foi removido.
+function removerCreditoCliente(clienteId, valor) {
+  const remover = Math.min(arred2(valor), getCreditoCliente(clienteId));
+  if (remover <= 0) return 0;
+
+  let restante = remover;
+  const acoes = [];
+  const entradas = db.pagamentos
+    .filter((p) => p.clienteId === clienteId && p.vendaId === CREDITO_ID)
+    .sort((a, b) => new Date(b.data) - new Date(a.data));
+  for (const p of entradas) {
+    if (restante <= 0) break;
+    const tira = Math.min(restante, p.valor);
+    restante = arred2(restante - tira);
+    p.valor = arred2(p.valor - tira);
+    if (p.valor <= 0) {
+      db.pagamentos = db.pagamentos.filter((x) => x !== p);
+      acoes.push(["deletar", { sheet: "Pagamentos", id: p.id }]);
+    } else {
+      acoes.push(["upsert", { sheet: "Pagamentos", row: p }]);
+    }
+  }
+
+  const cliente = ajustarCreditoCliente(clienteId, -remover);
+  saveDB();
+  syncSequencial([...acoes, ["upsert", { sheet: "Clientes", row: cliente }]]);
+  return remover;
+}
+
 // Abate "valor" das vendas fiado em aberto do cliente, as mais antigas
 // primeiro (FIFO). Devolve as vendas que mudaram.
 function aplicarPagamentoFifo(clienteId, valor) {
@@ -1783,6 +1814,7 @@ function renderPerfilCliente() {
         <button class="btn btn--secondary btn--block" data-action="nova-venda-cliente">🛒 Nova venda pra este cliente</button>
         <button class="btn btn--primary btn--block" data-action="registrar-pagamento" ${saldo <= 0 ? "disabled" : ""}>💰 Registrar pagamento</button>
         ${cliente.fixo ? "" : `<button class="btn btn--secondary btn--block" data-action="adicionar-credito">💚 Adicionar crédito (adiantamento)</button>`}
+        ${credito > 0 ? `<button class="btn btn--secondary btn--block" data-action="remover-credito">✂️ Corrigir / remover crédito</button>` : ""}
         ${credito > 0 && saldo > 0 ? `<button class="btn btn--secondary btn--block" data-action="usar-credito">💚 Usar crédito (${formatCurrency(Math.min(credito, saldo))}) na dívida</button>` : ""}
         <button class="btn btn--whatsapp btn--block" data-action="cobrar-whatsapp" ${!cliente.telefone ? "disabled" : ""}>📱 Cobrar pelo WhatsApp</button>
       </div>
@@ -1854,6 +1886,7 @@ function renderPerfilCliente() {
   });
   el.querySelector('[data-action="registrar-pagamento"]').addEventListener("click", () => abrirFormPagamento(cliente));
   el.querySelector('[data-action="adicionar-credito"]')?.addEventListener("click", () => abrirFormCredito(cliente));
+  el.querySelector('[data-action="remover-credito"]')?.addEventListener("click", () => abrirFormRemoverCredito(cliente));
   el.querySelector('[data-action="usar-credito"]')?.addEventListener("click", () => {
     const usado = usarCreditoCliente(cliente.id);
     showToast(`💚 ${formatCurrency(usado)} de crédito abatido da dívida.`);
@@ -1943,6 +1976,35 @@ function abrirFormCredito(cliente) {
       showToast(`💚 ${formatCurrency(values.valor)} de crédito adicionado.`);
       renderPerfilCliente();
       if (ui.viewAtual === "inicio") renderView("inicio");
+    },
+  });
+}
+
+// Tira crédito lançado por engano (não é dinheiro devolvido nem usado em dívida).
+function abrirFormRemoverCredito(cliente) {
+  const credito = getCreditoCliente(cliente.id);
+  openPrompt({
+    title: "✂️ Corrigir crédito",
+    fields: [
+      {
+        id: "valor",
+        label: `Quanto remover do crédito de ${cliente.nome} (saldo atual: ${formatCurrency(credito)})`,
+        type: "number",
+        inputmode: "decimal",
+        step: "0.01",
+        value: credito,
+      },
+    ],
+    confirmText: "Remover",
+    onSubmit: (values) => {
+      if (!(values.valor > 0)) {
+        showToast("Informe um valor válido.");
+        return;
+      }
+      const removido = removerCreditoCliente(cliente.id, values.valor);
+      showToast(`✂️ ${formatCurrency(removido)} de crédito removido.`);
+      renderPerfilCliente();
+      renderView(ui.viewAtual);
     },
   });
 }
