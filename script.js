@@ -1519,15 +1519,23 @@ function renderVendaView() {
   // cada venda) e total por ciclo (manhã/tarde, pelo horário do lançamento).
   // Por cliente também junta o que foi vendido (produto x quantidade) e
   // quanto já está pago / ainda não pago (legenda).
+  // A lista vem ordenada pela venda mais recente (quem comprou por último no topo).
   const porCliente = new Map();
   let totalDia = 0;
   const ciclos = { Manhã: 0, Tarde: 0 };
   vendasHoje.forEach((v) => {
-    const acc = porCliente.get(v.clienteId) || { total: 0, pago: 0, naoPago: 0, itens: new Map() };
+    const acc = porCliente.get(v.clienteId) || {
+      total: 0, avista: 0, fiadoPago: 0, parcial: 0, pendente: 0, ultima: 0, itens: new Map(),
+    };
     const restante = v.formaPagamento === "fiado" ? Math.min(v.valorRestante, v.valorTotal) : 0;
     acc.total += v.valorTotal;
-    acc.naoPago += restante;
-    acc.pago += v.valorTotal - restante;
+    acc.ultima = Math.max(acc.ultima, new Date(v.data).getTime() || 0);
+    if (v.formaPagamento !== "fiado") acc.avista += v.valorTotal;
+    else if (v.status === "pago") acc.fiadoPago += v.valorTotal;
+    else {
+      acc.pendente += restante;
+      acc.parcial += v.valorTotal - restante;
+    }
     db.itensVenda
       .filter((i) => i.vendaId === v.id)
       .forEach((i) => acc.itens.set(i.produtoId, (acc.itens.get(i.produtoId) || 0) + i.quantidade));
@@ -1539,12 +1547,17 @@ function renderVendaView() {
     .map(([clienteId, acc]) => ({
       clienteId,
       total: acc.total,
-      pago: arred2(acc.pago),
-      naoPago: arred2(acc.naoPago),
+      ultima: acc.ultima,
+      legenda: [
+        [acc.avista, "badge--success", "🟢 À vista"],
+        [acc.fiadoPago, "badge--success", "🟢 Fiado - Pago"],
+        [acc.parcial, "badge--warning", "🟡 Fiado - Pago parcial"],
+        [acc.pendente, "badge--danger", "🔴 Fiado - Pendente"],
+      ].filter(([valor]) => arred2(valor) > 0),
       itens: [...acc.itens.entries()].map(([produtoId, qtd]) => `${qtd}x ${getProduto(produtoId)?.nome || "Produto"}`).join(", "),
       nome: getCliente(clienteId)?.nome || "Cliente",
     }))
-    .sort((a, b) => b.total - a.total);
+    .sort((a, b) => b.ultima - a.ultima);
 
   el.innerHTML = `
     <h2 class="view-title">🛒 Venda</h2>
@@ -1570,9 +1583,9 @@ function renderVendaView() {
                   <div class="list-item__main">
                     <strong>${l.nome}</strong>
                     <span class="list-item__itens">${l.itens}</span>
+                    <span class="list-item__itens">Última venda às ${new Date(l.ultima).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}</span>
                     <div class="venda-legenda">
-                      ${l.pago > 0 ? `<span class="badge badge--success">🟢 Pago ${formatCurrency(l.pago)}</span>` : ""}
-                      ${l.naoPago > 0 ? `<span class="badge badge--danger">🔴 Não pago ${formatCurrency(l.naoPago)}</span>` : ""}
+                      ${l.legenda.map(([valor, cls, texto]) => `<span class="badge ${cls}">${texto} ${formatCurrency(valor)}</span>`).join("")}
                     </div>
                   </div>
                   <div class="list-item__side"><span class="list-item__value">${formatCurrency(l.total)}</span></div>
