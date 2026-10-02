@@ -2112,7 +2112,42 @@ function cobrarPeloWhatsApp(cliente) {
 
   let digits = onlyDigits(cliente.telefone);
   if (digits.length <= 11) digits = `55${digits}`;
-  window.open(`https://wa.me/${digits}?text=${encodeURIComponent(mensagem)}`, "_blank");
+  const janela = window.open(`https://wa.me/${digits}?text=${encodeURIComponent(mensagem)}`, "_blank");
+  if (!janela) {
+    showToast("Não consegui abrir o WhatsApp. Libere pop-ups e tente de novo.");
+    return;
+  }
+  showToast(`📱 Abrindo o WhatsApp de ${cliente.nome}...`);
+  perguntarSeMensagemFoiEnviada(cliente);
+}
+
+// O WhatsApp só abre a conversa com o texto pronto — quem aperta "enviar" é a
+// pessoa, e o app não tem como saber se ela apertou. Então, quando ela volta
+// pro app, perguntamos e só então mostramos o aviso de "enviada".
+function perguntarSeMensagemFoiEnviada(cliente) {
+  const abertoEm = Date.now();
+  const aoVoltar = () => {
+    if (document.visibilityState === "hidden" || Date.now() - abertoEm < 1500) return;
+    document.removeEventListener("visibilitychange", aoVoltar);
+    window.removeEventListener("focus", aoVoltar);
+    openConfirm({
+      title: "📱 Mensagem enviada?",
+      message: `Você enviou a mensagem para ${cliente.nome} no WhatsApp?`,
+      confirmText: "Sim, enviei",
+      cancelText: "Não enviei",
+      onConfirm: () => {
+        const hora = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+        openConfirm({
+          title: "✅ Mensagem enviada!",
+          message: `A mensagem para ${cliente.nome} já foi enviada (${hora}).`,
+          confirmText: "OK",
+          somenteConfirmar: true,
+        });
+      },
+    });
+  };
+  document.addEventListener("visibilitychange", aoVoltar);
+  window.addEventListener("focus", aoVoltar);
 }
 
 /* ==========================================================================
