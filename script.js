@@ -1763,6 +1763,11 @@ function renderListaClientes() {
               <div class="list-item__main">
                 <strong>${c.nome}</strong>
                 <span class="list-item__meta">📱 ${formatPhone(c.telefone)}</span>
+                ${
+                  getUltimaCobranca(c)
+                    ? `<span class="list-item__enviado">✅ Mensagem enviada em ${formatDateTime(getUltimaCobranca(c))}</span>`
+                    : ""
+                }
               </div>
               <div class="list-item__side">
                 <span class="badge">${status.emoji} ${saldo > 0 ? `Deve ${formatCurrency(saldo)}` : "Em dia"}</span>
@@ -2103,6 +2108,37 @@ function mostrarResumoPagamento({ cliente, saldoAntes, valorPago, novoSaldo, sob
   });
 }
 
+// Guarda quando a última cobrança foi enviada: na linha do cliente (vai pra
+// planilha, coluna "ultimaCobranca", e aparece em outros aparelhos) e também
+// só neste aparelho, pra não se perder se a planilha ainda não tiver a coluna.
+const COBRANCAS_KEY = "cowboySalgadosCobrancas_v1";
+
+function lerCobrancasLocais() {
+  try {
+    return JSON.parse(localStorage.getItem(COBRANCAS_KEY)) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function getUltimaCobranca(cliente) {
+  const local = lerCobrancasLocais()[cliente.id] || "";
+  const remota = cliente.ultimaCobranca || "";
+  return local > remota ? local : remota || null;
+}
+
+function registrarCobrancaEnviada(clienteId) {
+  const cliente = getCliente(clienteId);
+  if (!cliente) return;
+  const agora = new Date().toISOString();
+  const locais = lerCobrancasLocais();
+  locais[clienteId] = agora;
+  localStorage.setItem(COBRANCAS_KEY, JSON.stringify(locais));
+  cliente.ultimaCobranca = agora;
+  saveDB();
+  syncInBackground("upsert", { sheet: "Clientes", row: cliente });
+}
+
 function cobrarPeloWhatsApp(cliente) {
   const saldo = calcularSaldoCliente(cliente.id);
   const mensagem =
@@ -2136,6 +2172,8 @@ function perguntarSeMensagemFoiEnviada(cliente) {
       confirmText: "Sim, enviei",
       cancelText: "Não enviei",
       onConfirm: () => {
+        registrarCobrancaEnviada(cliente.id);
+        if (ui.viewAtual === "clientes") renderListaClientes();
         const hora = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
         openConfirm({
           title: "✅ Mensagem enviada!",
