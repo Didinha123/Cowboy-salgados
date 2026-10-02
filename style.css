@@ -966,9 +966,22 @@ select {
   }
 }
 
-.badge--credito {
+.badge--credito,
+.badge--success {
   background: var(--success-bg);
   color: var(--success);
+}
+
+.list-item__itens {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.venda-legenda {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
 }
 
 .profile-card__credito {
