@@ -752,6 +752,7 @@ function criarCliente({ nome, telefone, observacao }) {
     nome: nome.trim(),
     telefone: onlyDigits(telefone),
     observacao: (observacao || "").trim(),
+    credito: 0,
     createdAt: new Date().toISOString(),
   };
   db.clientes.push(cliente);
@@ -838,6 +839,8 @@ function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagament
     pagamentosExtras.push({ id: `pagcr-${vendaId}`, clienteId, vendaId: CREDITO_ID, valor: pg.sobra, formaPagamento, data });
   }
   db.pagamentos.push(...pagamentosExtras);
+  const clienteCredito =
+    pg.creditoAplicado > 0 || pg.sobra > 0 ? ajustarCreditoCliente(clienteId, pg.sobra - pg.creditoAplicado) : null;
 
   db.vendas.push(venda);
   db.itensVenda.push(...itensRegistrados);
@@ -853,6 +856,7 @@ function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagament
   syncSequencial([
     ["registrarVenda", { venda, itens: itensRegistrados, estoque: produtosAfetados.map((id) => getEstoque(id)) }],
     ...pagamentosExtras.map((row) => ["upsert", { sheet: "Pagamentos", row }]),
+    ...(clienteCredito ? [["upsert", { sheet: "Clientes", row: clienteCredito }]] : []),
   ]);
 
   return venda;
@@ -895,16 +899,19 @@ function getCreditoRecebidoHoje(referenceDate = new Date()) {
 
 // Soma do saldo positivo de todos os clientes (o "caixa positivo" total).
 function getCreditoTotalEmCaixa() {
-  const soma = (marca) => db.pagamentos.filter((p) => p.vendaId === marca).reduce((s, p) => s + p.valor, 0);
-  return Math.max(0, arred2(soma(CREDITO_ID) - soma(CREDITO_USADO_ID)));
+  return Math.max(0, arred2(db.clientes.reduce((s, c) => s + (Number(c.credito) || 0), 0)));
 }
 
 // Entrada de crédito a qualquer momento (adiantamento/depósito), sem precisar de venda.
 function adicionarCreditoCliente(clienteId, valor, formaPagamento) {
   const row = { id: generateId("pag"), clienteId, vendaId: CREDITO_ID, valor: arred2(valor), formaPagamento, data: new Date().toISOString() };
   db.pagamentos.push(row);
+  const cliente = ajustarCreditoCliente(clienteId, row.valor);
   saveDB();
-  syncSequencial([["upsert", { sheet: "Pagamentos", row }]]);
+  syncSequencial([
+    ["upsert", { sheet: "Pagamentos", row }],
+    ...(cliente ? [["upsert", { sheet: "Clientes", row: cliente }]] : []),
+  ]);
   return row;
 }
 
@@ -915,10 +922,21 @@ function adicionarCreditoCliente(clienteId, valor, formaPagamento) {
 const CREDITO_ID = "CREDITO";
 const CREDITO_USADO_ID = "CREDITO-USADO";
 
+// O saldo atual fica na coluna "credito" da aba Clientes da planilha (dá pra
+// ver e apagar direto lá). As linhas CREDITO/CREDITO-USADO em Pagamentos
+// seguem só como histórico (relatórios), não decidem mais o saldo.
 function getCreditoCliente(clienteId) {
-  const soma = (marca) =>
-    db.pagamentos.filter((p) => p.clienteId === clienteId && p.vendaId === marca).reduce((s, p) => s + p.valor, 0);
-  return Math.max(0, Math.round((soma(CREDITO_ID) - soma(CREDITO_USADO_ID)) * 100) / 100);
+  const cliente = getCliente(clienteId);
+  return cliente ? Math.max(0, arred2(Number(cliente.credito) || 0)) : 0;
+}
+
+// Soma (ou subtrai, se negativo) do saldo do cliente. Devolve a linha do
+// cliente já atualizada, pronta pra ir pra planilha.
+function ajustarCreditoCliente(clienteId, delta) {
+  const cliente = getCliente(clienteId);
+  if (!cliente) return null;
+  cliente.credito = Math.max(0, arred2((Number(cliente.credito) || 0) + delta));
+  return cliente;
 }
 
 // Abate "valor" das vendas fiado em aberto do cliente, as mais antigas
@@ -964,6 +982,8 @@ function registrarPagamento(clienteId, valorInformado, formaPagamento) {
     const credito = { id: generateId("pag"), clienteId, vendaId: CREDITO_ID, valor: sobra, formaPagamento, data: agora };
     db.pagamentos.push(credito);
     acoes.push(["upsert", { sheet: "Pagamentos", row: credito }]);
+    const cliente = ajustarCreditoCliente(clienteId, sobra);
+    if (cliente) acoes.push(["upsert", { sheet: "Clientes", row: cliente }]);
   }
   saveDB();
   syncSequencial(acoes);
@@ -985,8 +1005,12 @@ function usarCreditoCliente(clienteId) {
     data: new Date().toISOString(),
   };
   db.pagamentos.push(pagamento);
+  const cliente = ajustarCreditoCliente(clienteId, -usar);
   saveDB();
-  syncSequencial([["registrarPagamento", { pagamento, vendasAtualizadas: vendasAlteradas }]]);
+  syncSequencial([
+    ["registrarPagamento", { pagamento, vendasAtualizadas: vendasAlteradas }],
+    ...(cliente ? [["upsert", { sheet: "Clientes", row: cliente }]] : []),
+  ]);
   return usar;
 }
 
@@ -1036,6 +1060,8 @@ function excluirVenda(vendaId) {
   // Crédito usado/sobra gerada NESSA venda voltam ao que eram antes dela.
   const pagamentosLigados = db.pagamentos.filter((p) => p.id === `pagcu-${vendaId}` || p.id === `pagcr-${vendaId}`);
   db.pagamentos = db.pagamentos.filter((p) => !pagamentosLigados.includes(p));
+  const deltaCredito = pagamentosLigados.reduce((s, p) => s + (p.id.startsWith("pagcu-") ? p.valor : -p.valor), 0);
+  const clienteCredito = deltaCredito !== 0 ? ajustarCreditoCliente(venda.clienteId, deltaCredito) : null;
 
   db.itensVenda = db.itensVenda.filter((i) => i.vendaId !== vendaId);
   db.vendas = db.vendas.filter((v) => v.id !== vendaId);
@@ -1046,6 +1072,7 @@ function excluirVenda(vendaId) {
   syncSequencial([
     ["excluirVenda", { vendaId, itemIds: itens.map((i) => i.id), estoque: estoquesAfetados }],
     ...pagamentosLigados.map((p) => ["deletar", { sheet: "Pagamentos", id: p.id }]),
+    ...(clienteCredito ? [["upsert", { sheet: "Clientes", row: clienteCredito }]] : []),
   ]);
 }
 
@@ -1490,16 +1517,33 @@ function renderVendaView() {
 
   // Acumulado por cliente (somando tudo que ele comprou hoje, sem listar
   // cada venda) e total por ciclo (manhã/tarde, pelo horário do lançamento).
+  // Por cliente também junta o que foi vendido (produto x quantidade) e
+  // quanto já está pago / ainda não pago (legenda).
   const porCliente = new Map();
   let totalDia = 0;
   const ciclos = { Manhã: 0, Tarde: 0 };
   vendasHoje.forEach((v) => {
-    porCliente.set(v.clienteId, (porCliente.get(v.clienteId) || 0) + v.valorTotal);
+    const acc = porCliente.get(v.clienteId) || { total: 0, pago: 0, naoPago: 0, itens: new Map() };
+    const restante = v.formaPagamento === "fiado" ? Math.min(v.valorRestante, v.valorTotal) : 0;
+    acc.total += v.valorTotal;
+    acc.naoPago += restante;
+    acc.pago += v.valorTotal - restante;
+    db.itensVenda
+      .filter((i) => i.vendaId === v.id)
+      .forEach((i) => acc.itens.set(i.produtoId, (acc.itens.get(i.produtoId) || 0) + i.quantidade));
+    porCliente.set(v.clienteId, acc);
     totalDia += v.valorTotal;
     ciclos[getCiclo(v.data)] += v.valorTotal;
   });
   const linhas = [...porCliente.entries()]
-    .map(([clienteId, total]) => ({ clienteId, total, nome: getCliente(clienteId)?.nome || "Cliente" }))
+    .map(([clienteId, acc]) => ({
+      clienteId,
+      total: acc.total,
+      pago: arred2(acc.pago),
+      naoPago: arred2(acc.naoPago),
+      itens: [...acc.itens.entries()].map(([produtoId, qtd]) => `${qtd}x ${getProduto(produtoId)?.nome || "Produto"}`).join(", "),
+      nome: getCliente(clienteId)?.nome || "Cliente",
+    }))
     .sort((a, b) => b.total - a.total);
 
   el.innerHTML = `
@@ -1523,7 +1567,14 @@ function renderVendaView() {
               .map(
                 (l) => `
                 <li class="list-item" data-cliente-id="${l.clienteId}">
-                  <div class="list-item__main"><strong>${l.nome}</strong></div>
+                  <div class="list-item__main">
+                    <strong>${l.nome}</strong>
+                    <span class="list-item__itens">${l.itens}</span>
+                    <div class="venda-legenda">
+                      ${l.pago > 0 ? `<span class="badge badge--success">🟢 Pago ${formatCurrency(l.pago)}</span>` : ""}
+                      ${l.naoPago > 0 ? `<span class="badge badge--danger">🔴 Não pago ${formatCurrency(l.naoPago)}</span>` : ""}
+                    </div>
+                  </div>
                   <div class="list-item__side"><span class="list-item__value">${formatCurrency(l.total)}</span></div>
                 </li>`
               )
