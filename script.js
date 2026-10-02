@@ -1768,6 +1768,7 @@ function renderListaClientes() {
                     ? `<span class="list-item__enviado">✅ Mensagem enviada em ${formatDateTime(getUltimaCobranca(c))}</span>`
                     : ""
                 }
+                ${lerCobrancaPendente()?.clienteId === c.id ? `<span class="list-item__meta">⏳ WhatsApp aberto — confirme o envio ao voltar pro app</span>` : ""}
               </div>
               <div class="list-item__side">
                 <span class="badge">${status.emoji} ${saldo > 0 ? `Deve ${formatCurrency(saldo)}` : "Em dia"}</span>
@@ -2154,38 +2155,59 @@ function cobrarPeloWhatsApp(cliente) {
     return;
   }
   showToast(`📱 Abrindo o WhatsApp de ${cliente.nome}...`);
-  perguntarSeMensagemFoiEnviada(cliente);
+  marcarCobrancaPendente(cliente.id);
 }
 
 // O WhatsApp só abre a conversa com o texto pronto — quem aperta "enviar" é a
-// pessoa, e o app não tem como saber se ela apertou. Então, quando ela volta
-// pro app, perguntamos e só então mostramos o aviso de "enviada".
-function perguntarSeMensagemFoiEnviada(cliente) {
-  const abertoEm = Date.now();
-  const aoVoltar = () => {
-    if (document.visibilityState === "hidden" || Date.now() - abertoEm < 1500) return;
-    document.removeEventListener("visibilitychange", aoVoltar);
-    window.removeEventListener("focus", aoVoltar);
-    openConfirm({
-      title: "📱 Mensagem enviada?",
-      message: `Você enviou a mensagem para ${cliente.nome} no WhatsApp?`,
-      confirmText: "Sim, enviei",
-      cancelText: "Não enviei",
-      onConfirm: () => {
-        registrarCobrancaEnviada(cliente.id);
-        if (ui.viewAtual === "clientes") renderListaClientes();
-        const hora = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-        openConfirm({
-          title: "✅ Mensagem enviada!",
-          message: `A mensagem para ${cliente.nome} já foi enviada (${hora}).`,
-          confirmText: "OK",
-          somenteConfirmar: true,
-        });
-      },
-    });
-  };
-  document.addEventListener("visibilitychange", aoVoltar);
-  window.addEventListener("focus", aoVoltar);
+// pessoa, e o app não tem como saber se ela apertou. Então guardamos que a
+// conversa foi aberta (no aparelho, pra sobreviver se o celular recarregar o
+// app enquanto o WhatsApp está aberto) e, quando a pessoa volta pro app,
+// perguntamos se enviou. Só com o "sim" aparece o aviso de "enviada".
+const COBRANCA_PENDENTE_KEY = "cowboySalgadosCobrancaPendente_v1";
+
+function lerCobrancaPendente() {
+  try {
+    const p = JSON.parse(localStorage.getItem(COBRANCA_PENDENTE_KEY));
+    // Esquece pedidos antigos (mais de 6h) pra não perguntar fora de hora.
+    return p && Date.now() - p.abertoEm < 6 * 60 * 60 * 1000 ? p : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function marcarCobrancaPendente(clienteId) {
+  localStorage.setItem(COBRANCA_PENDENTE_KEY, JSON.stringify({ clienteId, abertoEm: Date.now() }));
+  if (ui.viewAtual === "clientes") renderListaClientes();
+}
+
+function verificarCobrancaPendente() {
+  const pendente = lerCobrancaPendente();
+  if (!pendente) return;
+  // Ainda dentro do 1º segundo e meio = o próprio clique que abriu o WhatsApp.
+  if (document.visibilityState === "hidden" || Date.now() - pendente.abertoEm < 1500) return;
+  if (!document.getElementById("modal-confirm").classList.contains("hidden")) return;
+  const cliente = getCliente(pendente.clienteId);
+  localStorage.removeItem(COBRANCA_PENDENTE_KEY);
+  if (!cliente) return;
+
+  openConfirm({
+    title: "📱 Mensagem enviada?",
+    message: `Você enviou a mensagem para ${cliente.nome} no WhatsApp?`,
+    confirmText: "Sim, enviei",
+    cancelText: "Não enviei",
+    onConfirm: () => {
+      registrarCobrancaEnviada(cliente.id);
+      if (ui.viewAtual === "clientes") renderListaClientes();
+      const hora = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+      openConfirm({
+        title: "✅ Mensagem enviada!",
+        message: `A mensagem para ${cliente.nome} já foi enviada (${hora}).`,
+        confirmText: "OK",
+        somenteConfirmar: true,
+      });
+    },
+  });
+  if (ui.viewAtual === "clientes") renderListaClientes();
 }
 
 /* ==========================================================================
@@ -3315,6 +3337,10 @@ function initEventListeners() {
     renderConfiguracoes();
     openOverlay("overlay-configuracoes");
   });
+  // Voltou pro app (da aba/app do WhatsApp) — pergunta se a cobrança foi enviada.
+  document.addEventListener("visibilitychange", verificarCobrancaPendente);
+  window.addEventListener("focus", verificarCobrancaPendente);
+  window.addEventListener("pageshow", verificarCobrancaPendente);
   const syncBadge = document.getElementById("sync-badge");
   if (syncBadge) {
     syncBadge.addEventListener("click", () => {
@@ -3331,6 +3357,7 @@ function init() {
   initEventListeners();
   montarBarraTurno();
   switchView("inicio"); // renderiza imediatamente com os dados locais/em cache
+  verificarCobrancaPendente(); // o celular pode ter recarregado o app enquanto o WhatsApp estava aberto
   setSyncStatus(apiUrl ? "offline" : "offline");
   if (apiUrl) {
     syncFromRemote({ silent: true }); // depois, atualiza em segundo plano com a planilha
