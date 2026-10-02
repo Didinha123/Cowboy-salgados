@@ -568,7 +568,7 @@ function diaFixoDoBotao(btn) {
 
 // Data sugerida de largada: o vencimento fixo mais próximo.
 function dataPrevisaoPadrao() {
-  return [15, 20, 30].map(proximoDiaFixo).sort()[0];
+  return [5, 15, 20, 30].map(proximoDiaFixo).sort()[0];
 }
 
 // Segunda-feira 00:00 da semana que contém "date" — para este sistema a
@@ -652,6 +652,7 @@ function calcularStatusCliente(clienteId, vendas = db.vendas) {
 // "parcial" (pagamento parcial já registrado) continua contando como
 // FIADO_PENDENTE — a venda só sai das pendências quando fica 100% paga.
 function getStatusPagamento(venda) {
+  if (venda.formaPagamento === "doacao") return { code: "DOADO", label: "Doado", emoji: "🎁" };
   if (venda.formaPagamento !== "fiado") return { code: "AVISTA", label: "À Vista", emoji: "🟢" };
   if (venda.status === "pago") return { code: "FIADO_PAGO", label: "Fiado - Pago", emoji: "🟢" };
   if (venda.status === "parcial") return { code: "FIADO_PENDENTE", label: "Fiado - Pendente", emoji: "🟡" };
@@ -701,7 +702,8 @@ function getItensDeVenda(vendaId) {
 
 // Total de salgados vendidos em uma data (usado para a meta diária).
 function getQuantidadeSalgadosNaData(referenceDate = new Date()) {
-  const vendasDia = getVendasDoDia(referenceDate);
+  // Doação não é venda: não conta pra meta de vendas.
+  const vendasDia = getVendasDoDia(referenceDate).filter((v) => v.formaPagamento !== "doacao");
   const idsVendasDia = new Set(vendasDia.map((v) => v.id));
   return db.itensVenda
     .filter((i) => idsVendasDia.has(i.vendaId) && getProduto(i.produtoId).tipo === "salgado")
@@ -811,7 +813,15 @@ function registrarVenda({ clienteId, itens, formaPagamento, dataPrevisaoPagament
     return { id: generateId("item"), vendaId, produtoId: item.produtoId, quantidade: item.quantidade, valorTotal: valorItem };
   });
 
-  valorTotal = Math.max(0, arred2(valorTotal - (desconto || 0)));
+  // Doação: sai do estoque mas não gera cobrança (valor da venda = 0). Os
+  // itens guardam o valor de tabela, que é o "quanto foi doado".
+  const isDoacao = formaPagamento === "doacao";
+  if (isDoacao) {
+    desconto = 0;
+    usarCredito = false;
+    valorRecebido = null;
+  }
+  valorTotal = isDoacao ? 0 : Math.max(0, arred2(valorTotal - (desconto || 0)));
   const isFiado = formaPagamento === "fiado";
 
   // Caixa positivo do cliente: o crédito pode abater esta venda (à vista ou
@@ -899,7 +909,7 @@ function getCreditoRecebidoHoje(referenceDate = new Date()) {
 
 // Soma do saldo positivo de todos os clientes (o "caixa positivo" total).
 function getCreditoTotalEmCaixa() {
-  return Math.max(0, arred2(db.clientes.reduce((s, c) => s + (Number(c.credito) || 0), 0)));
+  return Math.max(0, arred2(db.clientes.reduce((s, c) => s + getCreditoCliente(c.id), 0)));
 }
 
 // Entrada de crédito a qualquer momento (adiantamento/depósito), sem precisar de venda.
@@ -927,7 +937,17 @@ const CREDITO_USADO_ID = "CREDITO-USADO";
 // seguem só como histórico (relatórios), não decidem mais o saldo.
 function getCreditoCliente(clienteId) {
   const cliente = getCliente(clienteId);
-  return cliente ? Math.max(0, arred2(Number(cliente.credito) || 0)) : 0;
+  if (!cliente) return 0;
+  // Planilha ainda sem a coluna "credito" (Apps Script antigo): usa o
+  // histórico de entradas/saídas de crédito até a coluna passar a existir.
+  if (cliente.credito === undefined || cliente.credito === null) return creditoPeloHistorico(clienteId);
+  return Math.max(0, arred2(Number(cliente.credito) || 0));
+}
+
+function creditoPeloHistorico(clienteId) {
+  const soma = (marca) =>
+    db.pagamentos.filter((p) => p.clienteId === clienteId && p.vendaId === marca).reduce((s, p) => s + p.valor, 0);
+  return Math.max(0, arred2(soma(CREDITO_ID) - soma(CREDITO_USADO_ID)));
 }
 
 // Soma (ou subtrai, se negativo) do saldo do cliente. Devolve a linha do
@@ -935,7 +955,12 @@ function getCreditoCliente(clienteId) {
 function ajustarCreditoCliente(clienteId, delta) {
   const cliente = getCliente(clienteId);
   if (!cliente) return null;
-  cliente.credito = Math.max(0, arred2((Number(cliente.credito) || 0) + delta));
+  if (cliente.credito === undefined || cliente.credito === null) {
+    // Quem chama já atualizou o histórico de crédito, então ele já reflete o novo saldo.
+    cliente.credito = creditoPeloHistorico(clienteId);
+  } else {
+    cliente.credito = Math.max(0, arred2((Number(cliente.credito) || 0) + delta));
+  }
   return cliente;
 }
 
@@ -1199,8 +1224,9 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
   const somaPorTipo = (tipo) =>
     itensPeriodo.filter((i) => getProduto(i.produtoId).tipo === tipo).reduce((sum, i) => sum + i.quantidade, 0);
 
-  const vendasVista = vendasPeriodo.filter((v) => v.formaPagamento !== "fiado");
+  const vendasVista = vendasPeriodo.filter((v) => v.formaPagamento !== "fiado" && v.formaPagamento !== "doacao");
   const vendasFiado = vendasPeriodo.filter((v) => v.formaPagamento === "fiado");
+  const vendasDoadas = vendasPeriodo.filter((v) => v.formaPagamento === "doacao");
 
   // "saldo" = parte da venda paga com o crédito do cliente (não é dinheiro novo).
   const formasPagamento = { pix: 0, dinheiro: 0, debito: 0, credito: 0, saldo: 0 };
@@ -1231,10 +1257,17 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
   itensPeriodo.forEach((i) => {
     catalogoPorVenda.set(i.vendaId, (catalogoPorVenda.get(i.vendaId) || 0) + i.valorTotal);
   });
-  const descontoTotal = vendasPeriodo.reduce((sum, v) => {
-    const catalogo = catalogoPorVenda.get(v.id) || 0;
-    return sum + Math.max(0, Math.round((catalogo - v.valorTotal) * 100) / 100);
-  }, 0);
+  const descontoTotal = vendasPeriodo
+    .filter((v) => v.formaPagamento !== "doacao")
+    .reduce((sum, v) => {
+      const catalogo = catalogoPorVenda.get(v.id) || 0;
+      return sum + Math.max(0, Math.round((catalogo - v.valorTotal) * 100) / 100);
+    }, 0);
+  // Doação não é desconto: vai pra uma linha própria (valor de tabela doado).
+  const doacaoTotal = vendasDoadas.reduce((sum, v) => sum + (catalogoPorVenda.get(v.id) || 0), 0);
+  const doacaoQuantidade = itensPeriodo
+    .filter((i) => vendasDoadas.some((v) => v.id === i.vendaId))
+    .reduce((sum, i) => sum + i.quantidade, 0);
 
   const ciclos = { Manhã: { quantidade: 0, total: 0 }, Tarde: { quantidade: 0, total: 0 } };
   vendasPeriodo.forEach((v) => {
@@ -1258,6 +1291,8 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
     valorFiado,
     valorAindaAReceber,
     descontoTotal,
+    doacaoTotal,
+    doacaoQuantidade,
     formasPagamento,
     vendas: vendasPeriodo,
   };
@@ -1556,12 +1591,13 @@ function renderVendaView() {
   const ciclos = { Manhã: 0, Tarde: 0 };
   vendasHoje.forEach((v) => {
     const acc = porCliente.get(v.clienteId) || {
-      total: 0, avista: 0, fiadoPago: 0, parcial: 0, pendente: 0, ultima: 0, itens: new Map(),
+      total: 0, avista: 0, fiadoPago: 0, parcial: 0, pendente: 0, doado: 0, ultima: 0, itens: new Map(),
     };
     const restante = v.formaPagamento === "fiado" ? Math.min(v.valorRestante, v.valorTotal) : 0;
     acc.total += v.valorTotal;
     acc.ultima = Math.max(acc.ultima, new Date(v.data).getTime() || 0);
-    if (v.formaPagamento !== "fiado") acc.avista += v.valorTotal;
+    if (v.formaPagamento === "doacao") acc.doado += getItensDeVenda(v.id).reduce((s, i) => s + i.valorTotal, 0);
+    else if (v.formaPagamento !== "fiado") acc.avista += v.valorTotal;
     else if (v.status === "pago") acc.fiadoPago += v.valorTotal;
     else {
       acc.pendente += restante;
@@ -1584,6 +1620,7 @@ function renderVendaView() {
         [acc.fiadoPago, "badge--success", "🟢 Fiado - Pago"],
         [acc.parcial, "badge--warning", "🟡 Fiado - Pago parcial"],
         [acc.pendente, "badge--danger", "🔴 Fiado - Pendente"],
+        [acc.doado, "badge--doado", "🎁 Doado"],
       ].filter(([valor]) => arred2(valor) > 0),
       itens: [...acc.itens.entries()].map(([produtoId, qtd]) => `${qtd}x ${getProduto(produtoId)?.nome || "Produto"}`).join(", "),
       nome: getCliente(clienteId)?.nome || "Cliente",
@@ -1814,7 +1851,7 @@ function renderPerfilCliente() {
         <button class="btn btn--secondary btn--block" data-action="nova-venda-cliente">🛒 Nova venda pra este cliente</button>
         <button class="btn btn--primary btn--block" data-action="registrar-pagamento" ${saldo <= 0 ? "disabled" : ""}>💰 Registrar pagamento</button>
         ${cliente.fixo ? "" : `<button class="btn btn--secondary btn--block" data-action="adicionar-credito">💚 Adicionar crédito (adiantamento)</button>`}
-        ${credito > 0 ? `<button class="btn btn--secondary btn--block" data-action="remover-credito">✂️ Corrigir / remover crédito</button>` : ""}
+        <button class="btn btn--secondary btn--block" data-action="remover-credito">✂️ Corrigir / remover crédito</button>
         ${credito > 0 && saldo > 0 ? `<button class="btn btn--secondary btn--block" data-action="usar-credito">💚 Usar crédito (${formatCurrency(Math.min(credito, saldo))}) na dívida</button>` : ""}
         <button class="btn btn--whatsapp btn--block" data-action="cobrar-whatsapp" ${!cliente.telefone ? "disabled" : ""}>📱 Cobrar pelo WhatsApp</button>
       </div>
@@ -1983,6 +2020,10 @@ function abrirFormCredito(cliente) {
 // Tira crédito lançado por engano (não é dinheiro devolvido nem usado em dívida).
 function abrirFormRemoverCredito(cliente) {
   const credito = getCreditoCliente(cliente.id);
+  if (credito <= 0) {
+    showToast(`${cliente.nome} não tem crédito para remover.`);
+    return;
+  }
   openPrompt({
     title: "✂️ Corrigir crédito",
     fields: [
@@ -2306,7 +2347,7 @@ function renderFiadoLista() {
 function adicionarAtalhosData(input) {
   const barra = document.createElement("div");
   barra.className = "date-presets";
-  barra.innerHTML = ["hoje", 15, 20, 30]
+  barra.innerHTML = ["hoje", 5, 15, 20, 30]
     .map((d) => `<button type="button" class="btn btn--small btn--secondary" data-dia-fixo="${d}">${d === "hoje" ? "Hoje" : `Dia ${d}`}</button>`)
     .join("");
   input.insertAdjacentElement("beforebegin", barra);
@@ -2477,6 +2518,7 @@ function renderRelatorio() {
             <option value="AVISTA" ${statusFiltro === "AVISTA" ? "selected" : ""}>À Vista</option>
             <option value="FIADO_PENDENTE" ${statusFiltro === "FIADO_PENDENTE" ? "selected" : ""}>Fiado - Pendente</option>
             <option value="FIADO_PAGO" ${statusFiltro === "FIADO_PAGO" ? "selected" : ""}>Fiado - Pago</option>
+            <option value="DOADO" ${statusFiltro === "DOADO" ? "selected" : ""}>🎁 Doado</option>
           </select>
         </div>
       </div>
@@ -2506,6 +2548,7 @@ function renderRelatorio() {
         <li><span>💚 Crédito recebido (sobras e depósitos)</span><strong>${formatCurrency(relatorio.creditoRecebido)}</strong></li>
         <li><span>💚 Crédito usado</span><strong>${formatCurrency(relatorio.creditoUsado)}</strong></li>
         <li><span>🏷️ Desconto dado</span><strong>${formatCurrency(relatorio.descontoTotal)}</strong></li>
+        <li><span>🎁 Doado (${relatorio.doacaoQuantidade} un.)</span><strong>${formatCurrency(relatorio.doacaoTotal)}</strong></li>
       </ul>
 
       <h4 class="section-subtitle">Formas de pagamento</h4>
@@ -2533,7 +2576,7 @@ function renderRelatorio() {
                   if (v.dataPagamento) metaPartes.push(`Pago em: ${formatDateTime(v.dataPagamento)}`);
                   return `<li class="list-item">
                     <div class="list-item__main"><strong>${cliente ? cliente.nome : "Cliente"}</strong><span class="list-item__meta">${metaPartes.join(" · ")}</span></div>
-                    <div class="list-item__side"><span class="list-item__value">${formatCurrency(v.valorTotal)}</span><span class="badge">${badge.emoji} ${badge.label}</span></div>
+                    <div class="list-item__side"><span class="list-item__value">${formatCurrency(badge.code === "DOADO" ? getItensDeVenda(v.id).reduce((s, i) => s + i.valorTotal, 0) : v.valorTotal)}</span><span class="badge">${badge.emoji} ${badge.label}</span></div>
                   </li>`;
                 })
                 .join("")
@@ -2942,7 +2985,8 @@ function renderPassoPagamento() {
     isFiado: forma === "fiado",
   });
   // Se o crédito cobre a venda toda, não precisa escolher forma de pagamento.
-  const podeConfirmar = forma === "fiado" || (forma === "vista" && (metodo || pgAtual.aReceberAgora <= 0.004));
+  const isDoacao = forma === "doacao";
+  const podeConfirmar = forma === "fiado" || isDoacao || (forma === "vista" && (metodo || pgAtual.aReceberAgora <= 0.004));
 
   el.innerHTML = `
     ${stepHeader("Forma de pagamento", true)}
@@ -2951,11 +2995,15 @@ function renderPassoPagamento() {
       <ul class="cart-list">
         ${itens.map((i) => `<li class="cart-item"><span>${i.produto.nome} x ${i.quantidade}</span><strong>${formatCurrency(i.valorTotal)}</strong></li>`).join("")}
       </ul>
-      <div class="form-field">
+      ${
+        isDoacao
+          ? ""
+          : `<div class="form-field">
         <label for="venda-desconto">Desconto (R$, opcional)</label>
         <input type="number" id="venda-desconto" inputmode="decimal" step="0.01" min="0" max="${total}" placeholder="0,00" value="${ui.novaVenda.desconto || ""}" />
-      </div>
-      <div class="cart-total"><span>Total</span><strong id="venda-total-valor">${formatCurrency(totalComDesconto)}</strong></div>
+      </div>`
+      }
+      <div class="cart-total"><span>${isDoacao ? "🎁 Valor doado" : "Total"}</span><strong id="venda-total-valor">${formatCurrency(isDoacao ? total : totalComDesconto)}</strong></div>
 
       <div class="payment-options">
         <button class="btn ${forma === "vista" ? "btn--primary" : "btn--secondary"} btn--block btn--xl" data-action="forma-vista">À VISTA</button>
@@ -2964,7 +3012,9 @@ function renderPassoPagamento() {
             ? ""
             : `<button class="btn ${forma === "fiado" ? "btn--primary" : "btn--secondary"} btn--block btn--xl" data-action="forma-fiado">PAGAR DEPOIS (FIADO)</button>`
         }
+        <button class="btn ${isDoacao ? "btn--primary" : "btn--secondary"} btn--block btn--xl" data-action="forma-doacao">🎁 DOAÇÃO (sem cobrar)</button>
       </div>
+      ${isDoacao ? `<p class="fiado-note">🎁 Esta venda será registrada como <strong>doada</strong>: sai do estoque, mas não entra no faturamento nem em contas a receber.</p>` : ""}
 
       ${
         forma === "vista"
@@ -2975,7 +3025,7 @@ function renderPassoPagamento() {
       }
 
       ${
-        forma && creditoDisponivel > 0
+        forma && !isDoacao && creditoDisponivel > 0
           ? `<label class="check-row"><input type="checkbox" id="venda-usar-credito" ${ui.novaVenda.usarCredito ? "checked" : ""} /> 💚 Usar crédito do cliente (${formatCurrency(creditoDisponivel)} disponível)</label>`
           : ""
       }
@@ -2998,6 +3048,7 @@ function renderPassoPagamento() {
               <p class="date-selected" id="venda-data-selecionada">📅 ${formatDateOnly(ui.novaVenda.dataPrevisaoPagamento)}</p>
               <div class="date-presets">
                 <button type="button" class="btn btn--small btn--secondary" data-dia-fixo="hoje">Hoje</button>
+                <button type="button" class="btn btn--small btn--secondary" data-dia-fixo="5">Dia 5</button>
                 <button type="button" class="btn btn--small btn--secondary" data-dia-fixo="15">Dia 15</button>
                 <button type="button" class="btn btn--small btn--secondary" data-dia-fixo="20">Dia 20</button>
                 <button type="button" class="btn btn--small btn--secondary" data-dia-fixo="30">Dia 30</button>
@@ -3019,6 +3070,14 @@ function renderPassoPagamento() {
   });
   el.querySelector('[data-action="forma-vista"]').addEventListener("click", () => {
     ui.novaVenda.formaPagamento = "vista";
+    renderPassoPagamento();
+  });
+  el.querySelector('[data-action="forma-doacao"]').addEventListener("click", () => {
+    ui.novaVenda.formaPagamento = "doacao";
+    ui.novaVenda.metodoVista = null;
+    ui.novaVenda.usarCredito = false;
+    ui.novaVenda.valorRecebido = null;
+    ui.novaVenda.desconto = 0;
     renderPassoPagamento();
   });
   el.querySelector('[data-action="forma-fiado"]')?.addEventListener("click", () => {
@@ -3109,7 +3168,8 @@ function confirmarNovaVenda() {
   if (total <= 0) return;
 
   const isFiado = ui.novaVenda.formaPagamento === "fiado";
-  const formaPagamentoFinal = isFiado ? "fiado" : ui.novaVenda.metodoVista || "saldo";
+  const isDoacao = ui.novaVenda.formaPagamento === "doacao";
+  const formaPagamentoFinal = isDoacao ? "doacao" : isFiado ? "fiado" : ui.novaVenda.metodoVista || "saldo";
   const desconto = Math.min(total, Math.max(0, ui.novaVenda.desconto || 0));
   const totalFinal = arred2(total - desconto);
   const pg = calcularPagamentoVenda({
@@ -3134,7 +3194,7 @@ function confirmarNovaVenda() {
     valorRecebido: ui.novaVenda.valorRecebido,
   });
 
-  showToast(`Venda de ${formatCurrency(total - desconto)} registrada!`);
+  showToast(isDoacao ? `🎁 Doação de ${formatCurrency(total)} registrada!` : `Venda de ${formatCurrency(total - desconto)} registrada!`);
   fecharNovaVenda();
   switchView("venda");
 }
