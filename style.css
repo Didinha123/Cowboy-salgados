@@ -972,6 +972,11 @@ select {
   color: var(--success);
 }
 
+.badge--warning {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
 .list-item__itens {
   color: var(--muted);
   font-size: 0.8rem;
