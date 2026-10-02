@@ -977,6 +977,11 @@ select {
   color: var(--warning);
 }
 
+.badge--doado {
+  background: #f3e8fd;
+  color: #7b1fa2;
+}
+
 .list-item__itens {
   color: var(--muted);
   font-size: 0.8rem;
