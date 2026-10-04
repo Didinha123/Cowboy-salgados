@@ -75,11 +75,26 @@ function loadApiUrl() {
   apiUrl = DEFAULT_API_URL;
 }
 
+// Chave de acesso: a URL acima fica num site público, então o Apps Script
+// (propriedade CHAVE_ACESSO) só atende quem enviar a chave certa. Cada
+// aparelho digita a chave uma vez e ela fica guardada aqui.
+const CHAVE_ACESSO_KEY = "cowboySalgadosChaveAcesso_v1";
+let tentouChave = false;
+
+function getChaveAcesso() {
+  return localStorage.getItem(CHAVE_ACESSO_KEY) || "";
+}
+
 // Busca o estado completo da planilha (fonte de verdade quando conectado).
 async function apiFetchAll() {
-  const res = await fetch(`${apiUrl}?action=getAll`);
+  const res = await fetch(`${apiUrl}?action=getAll&chave=${encodeURIComponent(getChaveAcesso())}`);
   if (!res.ok) throw new Error("Falha ao consultar a planilha.");
-  return res.json();
+  const json = await res.json();
+  if (json && json.error === "chave_invalida") {
+    mostrarTelaChave();
+    throw new Error("Chave de acesso inválida.");
+  }
+  return json;
 }
 
 // Envia uma ação de escrita para o Apps Script.
@@ -89,11 +104,49 @@ async function apiPost(action, payload) {
   const res = await fetch(apiUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({ action, ...payload }),
+    body: JSON.stringify({ action, chave: getChaveAcesso(), ...payload }),
   });
   const json = await res.json();
+  if (json && json.error === "chave_invalida") {
+    mostrarTelaChave();
+    throw new Error("Chave de acesso inválida.");
+  }
   if (!json.ok) throw new Error(json.error || "Falha ao sincronizar com a planilha.");
   return json;
+}
+
+// Tela cheia pedindo a chave (por cima de tudo) — some quando a chave estiver certa.
+function mostrarTelaChave() {
+  if (document.getElementById("tela-chave")) return;
+  const tela = document.createElement("div");
+  tela.id = "tela-chave";
+  tela.className = "tela-chave";
+  tela.innerHTML = `
+    <div class="tela-chave__card">
+      <div class="tela-chave__icone">🔒</div>
+      <h2>Cowboy Salgados</h2>
+      <p>Digite a chave de acesso para entrar.</p>
+      <input type="password" id="tela-chave-input" placeholder="Chave de acesso" autocomplete="off" />
+      <p class="texto-erro" id="tela-chave-erro">${tentouChave ? "Chave incorreta. Tente de novo." : ""}</p>
+      <button type="button" class="btn btn--primary btn--block btn--xl" id="tela-chave-btn">Entrar</button>
+    </div>
+  `;
+  document.body.appendChild(tela);
+
+  const input = document.getElementById("tela-chave-input");
+  const entrar = () => {
+    const valor = input.value.trim();
+    if (!valor) return;
+    localStorage.setItem(CHAVE_ACESSO_KEY, valor);
+    tentouChave = true;
+    tela.remove();
+    syncFromRemote({ silent: true });
+  };
+  document.getElementById("tela-chave-btn").addEventListener("click", entrar);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") entrar();
+  });
+  input.focus();
 }
 
 // Dispara uma sincronização sem bloquear a interface (otimista):
