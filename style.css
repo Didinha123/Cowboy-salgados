@@ -979,6 +979,34 @@ select {
 
 /* ---------------------------------- Aba Acerto ---------------------------------- */
 
+.stat-row--2 {
+  grid-template-columns: repeat(2, 1fr);
+  margin-bottom: 6px;
+}
+
+.stat-box--grande {
+  padding: 16px 8px;
+}
+
+.stat-box--grande span {
+  font-size: 0.8rem;
+}
+
+.stat-box--grande strong {
+  font-size: 1.45rem;
+}
+
+.stat-box--acertado strong {
+  color: var(--success);
+}
+
+.acerto-contagem {
+  margin: 0 0 12px;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 .acerto-formas {
   display: flex;
   flex-wrap: wrap;
