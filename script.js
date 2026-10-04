@@ -3361,10 +3361,11 @@ function renderAcerto() {
 
   el.innerHTML = `
     <h2 class="view-title">🤝 Acerto</h2>
-    <div class="stat-row">
-      <div class="stat-box"><span>Total a receber</span><strong>${formatCurrency(totalAReceber)}</strong></div>
-      <div class="stat-box"><span>Clientes devendo</span><strong>${todos.length}</strong></div>
+    <div class="stat-row stat-row--2">
+      <div class="stat-box stat-box--grande"><span>Total a receber</span><strong>${formatCurrency(totalAReceber)}</strong></div>
+      <div class="stat-box stat-box--grande stat-box--acertado"><span>✅ Acertado hoje</span><strong>${formatCurrency(getRecebidoFiadoHoje())}</strong></div>
     </div>
+    <p class="acerto-contagem">${todos.length} cliente(s) devendo</p>
 
     <h3 class="section-subtitle">Receber em:</h3>
     <div class="acerto-formas">
