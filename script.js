@@ -1455,6 +1455,7 @@ function renderView(viewName) {
   else if (viewName === "clientes") renderClientes();
   else if (viewName === "fiado") renderFiado();
   else if (viewName === "estoque") renderEstoque();
+  else if (viewName === "acerto") renderAcerto();
 }
 
 function openOverlay(id) {
@@ -1763,12 +1764,7 @@ function renderListaClientes() {
               <div class="list-item__main">
                 <strong>${c.nome}</strong>
                 <span class="list-item__meta">📱 ${formatPhone(c.telefone)}</span>
-                ${
-                  getUltimaCobranca(c)
-                    ? `<span class="list-item__enviado">✅ Mensagem enviada em ${formatDateTime(getUltimaCobranca(c))}</span>`
-                    : ""
-                }
-                ${lerCobrancaPendente()?.clienteId === c.id ? `<span class="list-item__meta">⏳ WhatsApp aberto — confirme o envio ao voltar pro app</span>` : ""}
+                ${htmlStatusCobranca(c)}
               </div>
               <div class="list-item__side">
                 <span class="badge">${status.emoji} ${saldo > 0 ? `Deve ${formatCurrency(saldo)}` : "Em dia"}</span>
@@ -2128,6 +2124,24 @@ function getUltimaCobranca(cliente) {
   return local > remota ? local : remota || null;
 }
 
+// Linhas "mensagem enviada" / "WhatsApp aberto" mostradas embaixo do cliente
+// nas abas Clientes e Fiado.
+function htmlStatusCobranca(cliente) {
+  if (!cliente) return "";
+  const enviada = getUltimaCobranca(cliente);
+  const pendente = lerCobrancaPendente()?.clienteId === cliente.id;
+  return (
+    (enviada ? `<span class="list-item__enviado">✅ Mensagem enviada em ${formatDateTime(enviada)}</span>` : "") +
+    (pendente ? `<span class="list-item__meta">⏳ WhatsApp aberto — confirme o envio ao voltar pro app</span>` : "")
+  );
+}
+
+// Atualiza a lista da aba aberta (Clientes ou Fiado) depois de uma cobrança.
+function atualizarListaCobranca() {
+  if (ui.viewAtual === "clientes") renderListaClientes();
+  else if (ui.viewAtual === "fiado") renderFiadoLista();
+}
+
 function registrarCobrancaEnviada(clienteId) {
   const cliente = getCliente(clienteId);
   if (!cliente) return;
@@ -2177,7 +2191,7 @@ function lerCobrancaPendente() {
 
 function marcarCobrancaPendente(clienteId) {
   localStorage.setItem(COBRANCA_PENDENTE_KEY, JSON.stringify({ clienteId, abertoEm: Date.now() }));
-  if (ui.viewAtual === "clientes") renderListaClientes();
+  atualizarListaCobranca();
 }
 
 function verificarCobrancaPendente() {
@@ -2197,7 +2211,7 @@ function verificarCobrancaPendente() {
     cancelText: "Não enviei",
     onConfirm: () => {
       registrarCobrancaEnviada(cliente.id);
-      if (ui.viewAtual === "clientes") renderListaClientes();
+      atualizarListaCobranca();
       const hora = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
       openConfirm({
         title: "✅ Mensagem enviada!",
@@ -2207,7 +2221,7 @@ function verificarCobrancaPendente() {
       });
     },
   });
-  if (ui.viewAtual === "clientes") renderListaClientes();
+  atualizarListaCobranca();
 }
 
 /* ==========================================================================
@@ -2423,6 +2437,7 @@ function renderFiadoLista() {
               <div class="list-item__main">
                 <strong>${nome}</strong>
                 ${vencimento ? `<span class="list-item__meta">${vencimento}</span>` : ""}
+                ${htmlStatusCobranca(getCliente(clienteId))}
               </div>
               <div class="list-item__side">
                 <span class="list-item__value-label">${pendentes.length ? "Falta pagar" : "Total pago"}</span>
@@ -3295,6 +3310,171 @@ function confirmarNovaVenda() {
 }
 
 /* ==========================================================================
+   19b. ABA ACERTO — receber o pagamento dos clientes o mais rápido possível
+   Aba nova e independente: só usa registrarPagamento / usarCreditoCliente
+   (as mesmas funções do perfil do cliente), então o desconto na dívida
+   segue exatamente a regra de sempre (vendas mais antigas primeiro).
+   ========================================================================== */
+
+const acertoUI = { busca: "", forma: "pix" };
+
+// Cria a seção e o botão da aba pelo JS (não depende de mudar o index.html).
+function montarAbaAcerto() {
+  const secao = document.createElement("section");
+  secao.id = "view-acerto";
+  secao.className = "view hidden";
+  document.querySelector(".views").appendChild(secao);
+
+  const botao = document.createElement("button");
+  botao.className = "nav-btn";
+  botao.dataset.view = "acerto";
+  botao.innerHTML = `<span class="nav-btn__icon">🤝</span><span>Acerto</span>`;
+  document.querySelector('.nav-btn[data-view="fiado"]').insertAdjacentElement("afterend", botao);
+}
+
+// Clientes que devem algo, com os atrasados primeiro e depois o vencimento mais próximo.
+function getClientesParaAcerto(busca) {
+  return filtrarClientes(busca)
+    .map((c) => {
+      const pendentes = db.vendas.filter((v) => v.clienteId === c.id && v.formaPagamento === "fiado" && v.valorRestante > 0);
+      const datas = pendentes.map((v) => v.dataPrevisaoPagamento).filter(Boolean).sort();
+      return {
+        cliente: c,
+        saldo: arred2(calcularSaldoCliente(c.id)),
+        credito: getCreditoCliente(c.id),
+        atrasado: pendentes.some((v) => isVendaAtrasada(v)),
+        proximaData: datas[0] || null,
+      };
+    })
+    .filter((e) => e.saldo > 0)
+    .sort((a, b) => {
+      if (a.atrasado !== b.atrasado) return a.atrasado ? -1 : 1;
+      if (a.proximaData !== b.proximaData) return !a.proximaData ? 1 : !b.proximaData ? -1 : a.proximaData < b.proximaData ? -1 : 1;
+      return b.saldo - a.saldo;
+    });
+}
+
+function renderAcerto() {
+  const el = document.getElementById("view-acerto");
+  const todos = getClientesParaAcerto("");
+  const totalAReceber = arred2(todos.reduce((s, e) => s + e.saldo, 0));
+
+  el.innerHTML = `
+    <h2 class="view-title">🤝 Acerto</h2>
+    <div class="stat-row">
+      <div class="stat-box"><span>Total a receber</span><strong>${formatCurrency(totalAReceber)}</strong></div>
+      <div class="stat-box"><span>Clientes devendo</span><strong>${todos.length}</strong></div>
+    </div>
+
+    <h3 class="section-subtitle">Receber em:</h3>
+    <div class="acerto-formas">
+      ${FORMAS_PAGAMENTO_VISTA.map(
+        (m) => `<button type="button" class="btn btn--small ${acertoUI.forma === m.id ? "btn--primary" : "btn--secondary"}" data-forma="${m.id}">${m.icon} ${m.label}</button>`
+      ).join("")}
+    </div>
+
+    <input type="search" class="search-input" id="acerto-busca" placeholder="Buscar cliente por nome ou telefone" value="${acertoUI.busca}" />
+    <ul class="list" id="acerto-lista"></ul>
+  `;
+
+  renderAcertoLista();
+
+  el.querySelectorAll("[data-forma]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      acertoUI.forma = btn.dataset.forma;
+      renderAcerto();
+    });
+  });
+  document.getElementById("acerto-busca").addEventListener("input", (e) => {
+    acertoUI.busca = e.target.value;
+    renderAcertoLista();
+  });
+}
+
+function renderAcertoLista() {
+  const ul = document.getElementById("acerto-lista");
+  if (!ul) return;
+  const lista = getClientesParaAcerto(acertoUI.busca);
+
+  ul.innerHTML =
+    lista.length === 0
+      ? `<li class="empty-state">${acertoUI.busca.trim() ? "Nenhum cliente devendo com essa busca." : "🎉 Ninguém está devendo!"}</li>`
+      : lista
+          .map(
+            ({ cliente, saldo, credito, atrasado, proximaData }) => `
+            <li class="acerto-card ${atrasado ? "acerto-card--atrasado" : ""}">
+              <div class="acerto-card__topo">
+                <div class="list-item__main">
+                  <strong>${cliente.nome}</strong>
+                  <span class="list-item__meta">${proximaData ? `Vence em ${formatDateOnly(proximaData)}` : "Sem data prevista"}</span>
+                  ${credito > 0 ? `<span class="badge badge--credito">💚 Crédito ${formatCurrency(credito)}</span>` : ""}
+                </div>
+                <div class="list-item__side">
+                  <span class="list-item__value-label">Falta pagar</span>
+                  <span class="list-item__value">${formatCurrency(saldo)}</span>
+                  ${atrasado ? `<span class="badge badge--danger">⏰ Atrasado</span>` : ""}
+                </div>
+              </div>
+              <div class="acerto-card__acoes">
+                <button type="button" class="btn btn--primary" data-acerto="quitar" data-cliente-id="${cliente.id}">✅ Receber tudo ${formatCurrency(saldo)}</button>
+                <button type="button" class="btn btn--secondary" data-acerto="parcial" data-cliente-id="${cliente.id}">Outro valor</button>
+                ${credito > 0 ? `<button type="button" class="btn btn--secondary" data-acerto="credito" data-cliente-id="${cliente.id}">💚 Usar crédito</button>` : ""}
+              </div>
+            </li>`
+          )
+          .join("");
+
+  ul.querySelectorAll("[data-acerto]").forEach((btn) => {
+    btn.addEventListener("click", () => acertoAcao(btn.dataset.acerto, btn.dataset.clienteId));
+  });
+}
+
+function acertoAcao(acao, clienteId) {
+  const cliente = getCliente(clienteId);
+  if (!cliente) return;
+  const saldo = arred2(calcularSaldoCliente(clienteId));
+  const forma = FORMAS_PAGAMENTO_VISTA.find((m) => m.id === acertoUI.forma);
+
+  if (acao === "quitar") {
+    openConfirm({
+      title: "💰 Receber pagamento",
+      message: `<strong>${cliente.nome}</strong>\nReceber <strong>${formatCurrency(saldo)}</strong> em ${forma.label}?\nA dívida é quitada na hora.`,
+      confirmText: "Receber",
+      onConfirm: () => acertoReceber(cliente, saldo),
+    });
+  } else if (acao === "parcial") {
+    openPrompt({
+      title: `💰 Receber de ${cliente.nome}`,
+      fields: [
+        { id: "valor", label: `Valor recebido em ${forma.label} (deve: ${formatCurrency(saldo)})`, type: "number", inputmode: "decimal", step: "0.01", placeholder: "0,00" },
+      ],
+      confirmText: "Receber",
+      onSubmit: (values) => {
+        if (!(values.valor > 0)) {
+          showToast("Informe um valor válido.");
+          return;
+        }
+        acertoReceber(cliente, values.valor);
+      },
+    });
+  } else if (acao === "credito") {
+    const usado = usarCreditoCliente(clienteId);
+    showToast(`💚 ${formatCurrency(usado)} de crédito abatido da dívida.`);
+    renderAcerto();
+  }
+}
+
+// Registra o pagamento (abate a dívida automaticamente, vendas mais antigas
+// primeiro) e mostra o resumo grande de sempre.
+function acertoReceber(cliente, valor) {
+  const saldoAntes = calcularSaldoCliente(cliente.id);
+  const resultado = registrarPagamento(cliente.id, valor, acertoUI.forma);
+  const novoSaldo = calcularSaldoCliente(cliente.id);
+  renderAcerto();
+  mostrarResumoPagamento({ cliente, saldoAntes, valorPago: resultado.valorRecebido, novoSaldo, sobra: resultado.sobra });
+}
+
+/* ==========================================================================
    20. INICIALIZAÇÃO
    ========================================================================== */
 
@@ -3354,6 +3534,7 @@ const SYNC_INTERVAL_MS = 60 * 1000;
 function init() {
   loadApiUrl();
   initDB();
+  montarAbaAcerto(); // antes dos listeners, pra o botão novo da navegação também funcionar
   initEventListeners();
   montarBarraTurno();
   switchView("inicio"); // renderiza imediatamente com os dados locais/em cache
