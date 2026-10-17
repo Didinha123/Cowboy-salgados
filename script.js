@@ -3632,87 +3632,49 @@ function acertoReceber(cliente, valor) {
 }
 
 /* ==========================================================================
-   19c. RELATÓRIO DE PAGAMENTOS — quem pagou, quanto, quando e como
+   19c. RELATÓRIO "QUEM PAGOU" — acertos de dívida (fiado pago)
    Mesmo formato do "Ver relatório completo" (período, filtros, totais e
-   histórico), mas olhando para o dinheiro que entrou. Só leitura: não altera
-   nenhum dado.
+   histórico), mas só com as dívidas que os clientes pagaram. Não inclui compras
+   à vista nem crédito. Só leitura: não altera nenhum dado.
    ========================================================================== */
 
-const relPagUI = { filtro: "hoje", customStart: null, customEnd: null, clienteFiltro: "", tipoFiltro: "", formaFiltro: "" };
-
-const TIPOS_PAGAMENTO = {
-  acerto: "Acerto de dívida",
-  avista: "Compra à vista",
-  credito: "Crédito / adiantamento",
-};
+const relPagUI = { filtro: "hoje", customStart: null, customEnd: null, clienteFiltro: "", formaFiltro: "" };
 
 function nomeForma(id) {
   const f = FORMAS_PAGAMENTO_VISTA.find((m) => m.id === id);
   return f ? `${f.icon} ${f.label}` : id || "—";
 }
 
-// Junta tudo que entrou de dinheiro no período: dívidas pagas, compras à vista
-// e crédito deixado (as três coisas que fazem uma pessoa "ter pago").
-function gerarRelatorioPagamentos({ filtro, customStart, customEnd, clienteFiltro, tipoFiltro, formaFiltro }) {
+// Pagamentos de dívida do período (não entram crédito deixado nem crédito usado).
+function gerarRelatorioPagamentos({ filtro, customStart, customEnd, clienteFiltro, formaFiltro }) {
   const { start, end } = getPeriodoRange(filtro, customStart, customEnd);
-  const naJanela = (iso) => {
-    const d = new Date(iso);
+  let eventos = pagamentosDoTurno().filter((p) => {
+    if (p.vendaId === CREDITO_ID || p.vendaId === CREDITO_USADO_ID) return false;
+    const d = new Date(p.data);
     return d >= start && d <= end;
-  };
-  let eventos = [];
-
-  pagamentosDoTurno().forEach((p) => {
-    if (!naJanela(p.data) || p.vendaId === CREDITO_USADO_ID) return; // crédito usado não é dinheiro novo
-    eventos.push({
-      tipo: p.vendaId === CREDITO_ID ? "credito" : "acerto",
-      clienteId: p.clienteId,
-      valor: p.valor,
-      forma: p.formaPagamento,
-      data: p.data,
-      descricao: "",
-    });
   });
-
-  vendasDoTurno().forEach((v) => {
-    if (!naJanela(v.data) || v.formaPagamento === "fiado" || v.formaPagamento === "doacao") return;
-    const valor = valorEmDinheiro(v);
-    if (valor <= 0) return;
-    eventos.push({ tipo: "avista", clienteId: v.clienteId, valor, forma: v.formaPagamento, data: v.data, descricao: v.descricao || "" });
-  });
-
-  if (clienteFiltro) eventos = eventos.filter((e) => e.clienteId === clienteFiltro);
-  if (tipoFiltro) eventos = eventos.filter((e) => e.tipo === tipoFiltro);
-  if (formaFiltro) eventos = eventos.filter((e) => e.forma === formaFiltro);
-  eventos.sort((a, b) => new Date(b.data) - new Date(a.data));
-
-  const soma = (lista) => arred2(lista.reduce((s, e) => s + e.valor, 0));
-  const porTipo = Object.keys(TIPOS_PAGAMENTO).map((t) => ({ tipo: t, total: soma(eventos.filter((e) => e.tipo === t)) }));
+  if (clienteFiltro) eventos = eventos.filter((p) => p.clienteId === clienteFiltro);
+  if (formaFiltro) eventos = eventos.filter((p) => p.formaPagamento === formaFiltro);
+  eventos = [...eventos].sort((a, b) => new Date(b.data) - new Date(a.data));
 
   const formas = new Map();
-  eventos.forEach((e) => formas.set(e.forma, (formas.get(e.forma) || 0) + e.valor));
+  eventos.forEach((e) => formas.set(e.formaPagamento, (formas.get(e.formaPagamento) || 0) + e.valor));
 
-  // Por pessoa: cada cliente numa linha; vendas de Cliente Avulso ficam separadas pela descrição.
   const pessoas = new Map();
   eventos.forEach((e) => {
-    const avulso = e.clienteId === CLIENTE_AVULSO_ID;
-    const chave = avulso ? `avulso:${e.descricao}` : e.clienteId;
-    const nome = avulso ? `🧾 Avulso — ${e.descricao || "sem descrição"}` : getCliente(e.clienteId)?.nome || "Cliente";
-    const acc = pessoas.get(chave) || { nome, total: 0, quantidade: 0, ultima: 0 };
+    const acc = pessoas.get(e.clienteId) || { nome: getCliente(e.clienteId)?.nome || "Cliente", total: 0, quantidade: 0, ultima: 0 };
     acc.total += e.valor;
     acc.quantidade += 1;
     acc.ultima = Math.max(acc.ultima, new Date(e.data).getTime() || 0);
-    pessoas.set(chave, acc);
+    pessoas.set(e.clienteId, acc);
   });
 
   return {
     periodo: { start, end },
     eventos,
-    total: soma(eventos),
-    porTipo,
+    total: arred2(eventos.reduce((s, e) => s + e.valor, 0)),
     formas: [...formas.entries()].map(([forma, total]) => ({ forma, total: arred2(total) })).sort((a, b) => b.total - a.total),
     pessoas: [...pessoas.values()].map((p) => ({ ...p, total: arred2(p.total) })).sort((a, b) => b.total - a.total),
-    clientesDistintos: new Set(eventos.filter((e) => e.clienteId !== CLIENTE_AVULSO_ID).map((e) => e.clienteId)).size,
-    avulsas: eventos.filter((e) => e.clienteId === CLIENTE_AVULSO_ID).length,
   };
 }
 
@@ -3741,6 +3703,7 @@ function renderRelatorioPagamentos() {
       <span></span>
     </div>
     <div class="overlay__body">
+      <p class="field-hint">Acertos de dívida: o que os clientes pagaram do fiado.</p>
       <div class="form-field">
         <label for="relpag-turno">Turno</label>
         <select id="relpag-turno">
@@ -3769,19 +3732,12 @@ function renderRelatorioPagamentos() {
             </div>`
           : ""
       }
-      <div class="form-field">
-        <label for="relpag-cliente">Cliente</label>
-        <select id="relpag-cliente">
-          <option value="">Todos os clientes</option>
-          ${clientesOrdenados.map((c) => `<option value="${c.id}" ${sel(f.clienteFiltro === c.id)}>${c.nome}</option>`).join("")}
-        </select>
-      </div>
       <div class="stat-row stat-row--2">
         <div class="form-field">
-          <label for="relpag-tipo">Tipo</label>
-          <select id="relpag-tipo">
+          <label for="relpag-cliente">Cliente</label>
+          <select id="relpag-cliente">
             <option value="">Todos</option>
-            ${Object.entries(TIPOS_PAGAMENTO).map(([k, nome]) => `<option value="${k}" ${sel(f.tipoFiltro === k)}>${nome}</option>`).join("")}
+            ${clientesOrdenados.map((c) => `<option value="${c.id}" ${sel(f.clienteFiltro === c.id)}>${c.nome}</option>`).join("")}
           </select>
         </div>
         <div class="form-field">
@@ -3794,15 +3750,9 @@ function renderRelatorioPagamentos() {
       </div>
 
       <div class="stat-row stat-row--2">
-        <div class="stat-box stat-box--grande"><span>👥 Pessoas que pagaram</span><strong>${r.clientesDistintos}</strong></div>
-        <div class="stat-box stat-box--grande stat-box--acertado"><span>💵 Total recebido</span><strong>${formatCurrency(r.total)}</strong></div>
+        <div class="stat-box stat-box--grande"><span>👥 Pessoas que pagaram</span><strong>${r.pessoas.length}</strong></div>
+        <div class="stat-box stat-box--grande stat-box--acertado"><span>💵 Total acertado</span><strong>${formatCurrency(r.total)}</strong></div>
       </div>
-      ${r.avulsas > 0 ? `<p class="acerto-contagem">+ ${r.avulsas} pagamento(s) de venda avulsa</p>` : ""}
-
-      <h4 class="section-subtitle">Por tipo</h4>
-      <ul class="stat-list">
-        ${r.porTipo.map((t) => `<li><span>${t.tipo === "acerto" ? "🤝" : t.tipo === "avista" ? "🛒" : "💚"} ${TIPOS_PAGAMENTO[t.tipo]}</span><strong>${formatCurrency(t.total)}</strong></li>`).join("")}
-      </ul>
 
       <h4 class="section-subtitle">Formas de pagamento</h4>
       <ul class="stat-list">
@@ -3813,7 +3763,7 @@ function renderRelatorioPagamentos() {
       <ul class="list">
         ${
           r.pessoas.length === 0
-            ? `<li class="empty-state">Ninguém pagou nesse período.</li>`
+            ? `<li class="empty-state">Ninguém pagou dívida nesse período.</li>`
             : r.pessoas
                 .map(
                   (p) => `<li class="list-item">
@@ -3833,10 +3783,9 @@ function renderRelatorioPagamentos() {
             : r.eventos
                 .map((e) => {
                   const nome = getCliente(e.clienteId)?.nome || "Cliente";
-                  const meta = [TIPOS_PAGAMENTO[e.tipo], ...(e.descricao ? [`📝 ${e.descricao}`] : []), formatDateTime(e.data)];
                   return `<li class="list-item">
-                    <div class="list-item__main"><strong>${nome}</strong><span class="list-item__meta">${meta.join(" · ")}</span></div>
-                    <div class="list-item__side"><span class="list-item__value">${formatCurrency(e.valor)}</span><span class="badge badge--success">${nomeForma(e.forma)}</span></div>
+                    <div class="list-item__main"><strong>${nome}</strong><span class="list-item__meta">${formatDateTime(e.data)}</span></div>
+                    <div class="list-item__side"><span class="list-item__value">${formatCurrency(e.valor)}</span><span class="badge badge--success">${nomeForma(e.formaPagamento)}</span></div>
                   </li>`;
                 })
                 .join("")
@@ -3857,10 +3806,6 @@ function renderRelatorioPagamentos() {
   });
   document.getElementById("relpag-cliente").addEventListener("change", (e) => {
     f.clienteFiltro = e.target.value;
-    reRender();
-  });
-  document.getElementById("relpag-tipo").addEventListener("change", (e) => {
-    f.tipoFiltro = e.target.value;
     reRender();
   });
   document.getElementById("relpag-forma").addEventListener("change", (e) => {
