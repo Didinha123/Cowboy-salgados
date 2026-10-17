@@ -1738,6 +1738,7 @@ function renderVendaView() {
     <button class="btn btn--primary btn--block btn--xl" id="venda-nova-btn">+ NOVA VENDA</button>
 
     <button class="btn btn--secondary btn--block" id="venda-relatorio-btn">📊 Ver relatório completo</button>
+    <button class="btn btn--secondary btn--block" id="venda-relpag-btn">💰 Relatório de quem pagou</button>
 
     <div class="stat-row">
       <div class="stat-box"><span>Total do dia</span><strong>${formatCurrency(totalDia)}</strong></div>
@@ -1798,6 +1799,7 @@ function renderVendaView() {
   `;
 
   document.getElementById("venda-nova-btn").addEventListener("click", startNovaVenda);
+  document.getElementById("venda-relpag-btn").addEventListener("click", abrirRelatorioPagamentos);
   document.getElementById("venda-relatorio-btn").addEventListener("click", () => {
     renderRelatorio();
     openOverlay("overlay-relatorio");
@@ -3513,6 +3515,7 @@ function renderAcerto() {
 
   el.innerHTML = `
     <h2 class="view-title">🤝 Acerto</h2>
+    <button class="btn btn--secondary btn--block" id="acerto-relpag-btn">💰 Relatório de quem pagou</button>
     <div class="stat-row stat-row--2">
       <div class="stat-box stat-box--grande"><span>Total a receber</span><strong>${formatCurrency(totalAReceber)}</strong></div>
       <div class="stat-box stat-box--grande stat-box--acertado"><span>✅ Acertado hoje</span><strong>${formatCurrency(getRecebidoFiadoHoje())}</strong></div>
@@ -3532,6 +3535,7 @@ function renderAcerto() {
 
   renderAcertoLista();
 
+  document.getElementById("acerto-relpag-btn").addEventListener("click", abrirRelatorioPagamentos);
   el.querySelectorAll("[data-forma]").forEach((btn) => {
     btn.addEventListener("click", () => {
       acertoUI.forma = btn.dataset.forma;
@@ -3625,6 +3629,252 @@ function acertoReceber(cliente, valor) {
   const novoSaldo = calcularSaldoCliente(cliente.id);
   renderAcerto();
   mostrarResumoPagamento({ cliente, saldoAntes, valorPago: resultado.valorRecebido, novoSaldo, sobra: resultado.sobra });
+}
+
+/* ==========================================================================
+   19c. RELATÓRIO DE PAGAMENTOS — quem pagou, quanto, quando e como
+   Mesmo formato do "Ver relatório completo" (período, filtros, totais e
+   histórico), mas olhando para o dinheiro que entrou. Só leitura: não altera
+   nenhum dado.
+   ========================================================================== */
+
+const relPagUI = { filtro: "hoje", customStart: null, customEnd: null, clienteFiltro: "", tipoFiltro: "", formaFiltro: "" };
+
+const TIPOS_PAGAMENTO = {
+  acerto: "Acerto de dívida",
+  avista: "Compra à vista",
+  credito: "Crédito / adiantamento",
+};
+
+function nomeForma(id) {
+  const f = FORMAS_PAGAMENTO_VISTA.find((m) => m.id === id);
+  return f ? `${f.icon} ${f.label}` : id || "—";
+}
+
+// Junta tudo que entrou de dinheiro no período: dívidas pagas, compras à vista
+// e crédito deixado (as três coisas que fazem uma pessoa "ter pago").
+function gerarRelatorioPagamentos({ filtro, customStart, customEnd, clienteFiltro, tipoFiltro, formaFiltro }) {
+  const { start, end } = getPeriodoRange(filtro, customStart, customEnd);
+  const naJanela = (iso) => {
+    const d = new Date(iso);
+    return d >= start && d <= end;
+  };
+  let eventos = [];
+
+  pagamentosDoTurno().forEach((p) => {
+    if (!naJanela(p.data) || p.vendaId === CREDITO_USADO_ID) return; // crédito usado não é dinheiro novo
+    eventos.push({
+      tipo: p.vendaId === CREDITO_ID ? "credito" : "acerto",
+      clienteId: p.clienteId,
+      valor: p.valor,
+      forma: p.formaPagamento,
+      data: p.data,
+      descricao: "",
+    });
+  });
+
+  vendasDoTurno().forEach((v) => {
+    if (!naJanela(v.data) || v.formaPagamento === "fiado" || v.formaPagamento === "doacao") return;
+    const valor = valorEmDinheiro(v);
+    if (valor <= 0) return;
+    eventos.push({ tipo: "avista", clienteId: v.clienteId, valor, forma: v.formaPagamento, data: v.data, descricao: v.descricao || "" });
+  });
+
+  if (clienteFiltro) eventos = eventos.filter((e) => e.clienteId === clienteFiltro);
+  if (tipoFiltro) eventos = eventos.filter((e) => e.tipo === tipoFiltro);
+  if (formaFiltro) eventos = eventos.filter((e) => e.forma === formaFiltro);
+  eventos.sort((a, b) => new Date(b.data) - new Date(a.data));
+
+  const soma = (lista) => arred2(lista.reduce((s, e) => s + e.valor, 0));
+  const porTipo = Object.keys(TIPOS_PAGAMENTO).map((t) => ({ tipo: t, total: soma(eventos.filter((e) => e.tipo === t)) }));
+
+  const formas = new Map();
+  eventos.forEach((e) => formas.set(e.forma, (formas.get(e.forma) || 0) + e.valor));
+
+  // Por pessoa: cada cliente numa linha; vendas de Cliente Avulso ficam separadas pela descrição.
+  const pessoas = new Map();
+  eventos.forEach((e) => {
+    const avulso = e.clienteId === CLIENTE_AVULSO_ID;
+    const chave = avulso ? `avulso:${e.descricao}` : e.clienteId;
+    const nome = avulso ? `🧾 Avulso — ${e.descricao || "sem descrição"}` : getCliente(e.clienteId)?.nome || "Cliente";
+    const acc = pessoas.get(chave) || { nome, total: 0, quantidade: 0, ultima: 0 };
+    acc.total += e.valor;
+    acc.quantidade += 1;
+    acc.ultima = Math.max(acc.ultima, new Date(e.data).getTime() || 0);
+    pessoas.set(chave, acc);
+  });
+
+  return {
+    periodo: { start, end },
+    eventos,
+    total: soma(eventos),
+    porTipo,
+    formas: [...formas.entries()].map(([forma, total]) => ({ forma, total: arred2(total) })).sort((a, b) => b.total - a.total),
+    pessoas: [...pessoas.values()].map((p) => ({ ...p, total: arred2(p.total) })).sort((a, b) => b.total - a.total),
+    clientesDistintos: new Set(eventos.filter((e) => e.clienteId !== CLIENTE_AVULSO_ID).map((e) => e.clienteId)).size,
+    avulsas: eventos.filter((e) => e.clienteId === CLIENTE_AVULSO_ID).length,
+  };
+}
+
+function abrirRelatorioPagamentos() {
+  if (!document.getElementById("overlay-relatorio-pagamentos")) {
+    const overlay = document.createElement("div");
+    overlay.id = "overlay-relatorio-pagamentos";
+    overlay.className = "overlay hidden";
+    document.querySelector(".app").appendChild(overlay);
+  }
+  renderRelatorioPagamentos();
+  openOverlay("overlay-relatorio-pagamentos");
+}
+
+function renderRelatorioPagamentos() {
+  const el = document.getElementById("overlay-relatorio-pagamentos");
+  const f = relPagUI;
+  const r = gerarRelatorioPagamentos(f);
+  const clientesOrdenados = [...db.clientes].sort((a, b) => a.nome.localeCompare(b.nome, "pt-BR"));
+  const sel = (cond) => (cond ? "selected" : "");
+
+  el.innerHTML = `
+    <div class="overlay__header">
+      <button class="icon-btn" data-action="fechar-relpag">←</button>
+      <h2>💰 Quem pagou</h2>
+      <span></span>
+    </div>
+    <div class="overlay__body">
+      <div class="form-field">
+        <label for="relpag-turno">Turno</label>
+        <select id="relpag-turno">
+          <option value="todos" ${sel(ui.turno === "todos")}>Todos os turnos</option>
+          <option value="Manhã" ${sel(ui.turno === "Manhã")}>Manhã (antes das 12h)</option>
+          <option value="Tarde" ${sel(ui.turno === "Tarde")}>Tarde (12h em diante)</option>
+        </select>
+      </div>
+      <div class="form-field">
+        <label for="relpag-filtro">Período</label>
+        <select id="relpag-filtro">
+          <option value="hoje" ${sel(f.filtro === "hoje")}>Hoje</option>
+          <option value="ontem" ${sel(f.filtro === "ontem")}>Ontem</option>
+          <option value="esta-semana" ${sel(f.filtro === "esta-semana")}>Esta semana</option>
+          <option value="semana-passada" ${sel(f.filtro === "semana-passada")}>Semana passada</option>
+          <option value="7dias" ${sel(f.filtro === "7dias")}>Últimos 7 dias</option>
+          <option value="mes" ${sel(f.filtro === "mes")}>Este mês</option>
+          <option value="personalizado" ${sel(f.filtro === "personalizado")}>Período personalizado</option>
+        </select>
+      </div>
+      ${
+        f.filtro === "personalizado"
+          ? `<div class="stat-row">
+              <div class="form-field"><label>De</label><input type="date" id="relpag-start" value="${f.customStart || toDateKey(new Date())}"/></div>
+              <div class="form-field"><label>Até</label><input type="date" id="relpag-end" value="${f.customEnd || toDateKey(new Date())}"/></div>
+            </div>`
+          : ""
+      }
+      <div class="form-field">
+        <label for="relpag-cliente">Cliente</label>
+        <select id="relpag-cliente">
+          <option value="">Todos os clientes</option>
+          ${clientesOrdenados.map((c) => `<option value="${c.id}" ${sel(f.clienteFiltro === c.id)}>${c.nome}</option>`).join("")}
+        </select>
+      </div>
+      <div class="stat-row stat-row--2">
+        <div class="form-field">
+          <label for="relpag-tipo">Tipo</label>
+          <select id="relpag-tipo">
+            <option value="">Todos</option>
+            ${Object.entries(TIPOS_PAGAMENTO).map(([k, nome]) => `<option value="${k}" ${sel(f.tipoFiltro === k)}>${nome}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-field">
+          <label for="relpag-forma">Forma</label>
+          <select id="relpag-forma">
+            <option value="">Todas</option>
+            ${FORMAS_PAGAMENTO_VISTA.map((m) => `<option value="${m.id}" ${sel(f.formaFiltro === m.id)}>${m.label}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+
+      <div class="stat-row stat-row--2">
+        <div class="stat-box stat-box--grande"><span>👥 Pessoas que pagaram</span><strong>${r.clientesDistintos}</strong></div>
+        <div class="stat-box stat-box--grande stat-box--acertado"><span>💵 Total recebido</span><strong>${formatCurrency(r.total)}</strong></div>
+      </div>
+      ${r.avulsas > 0 ? `<p class="acerto-contagem">+ ${r.avulsas} pagamento(s) de venda avulsa</p>` : ""}
+
+      <h4 class="section-subtitle">Por tipo</h4>
+      <ul class="stat-list">
+        ${r.porTipo.map((t) => `<li><span>${t.tipo === "acerto" ? "🤝" : t.tipo === "avista" ? "🛒" : "💚"} ${TIPOS_PAGAMENTO[t.tipo]}</span><strong>${formatCurrency(t.total)}</strong></li>`).join("")}
+      </ul>
+
+      <h4 class="section-subtitle">Formas de pagamento</h4>
+      <ul class="stat-list">
+        ${r.formas.length === 0 ? `<li><span>Nenhum pagamento no período</span><strong>—</strong></li>` : r.formas.map((x) => `<li><span>${nomeForma(x.forma)}</span><strong>${formatCurrency(x.total)}</strong></li>`).join("")}
+      </ul>
+
+      <h4 class="section-subtitle">Por pessoa (${r.pessoas.length})</h4>
+      <ul class="list">
+        ${
+          r.pessoas.length === 0
+            ? `<li class="empty-state">Ninguém pagou nesse período.</li>`
+            : r.pessoas
+                .map(
+                  (p) => `<li class="list-item">
+                    <div class="list-item__main"><strong>${p.nome}</strong><span class="list-item__meta">${p.quantidade} pagamento${p.quantidade > 1 ? "s" : ""} · último em ${formatDateTime(new Date(p.ultima).toISOString())}</span></div>
+                    <div class="list-item__side"><span class="list-item__value">${formatCurrency(p.total)}</span></div>
+                  </li>`
+                )
+                .join("")
+        }
+      </ul>
+
+      <h4 class="section-subtitle">Histórico de pagamentos (${r.eventos.length})</h4>
+      <ul class="list">
+        ${
+          r.eventos.length === 0
+            ? `<li class="empty-state">Nenhum pagamento encontrado com esses filtros.</li>`
+            : r.eventos
+                .map((e) => {
+                  const nome = getCliente(e.clienteId)?.nome || "Cliente";
+                  const meta = [TIPOS_PAGAMENTO[e.tipo], ...(e.descricao ? [`📝 ${e.descricao}`] : []), formatDateTime(e.data)];
+                  return `<li class="list-item">
+                    <div class="list-item__main"><strong>${nome}</strong><span class="list-item__meta">${meta.join(" · ")}</span></div>
+                    <div class="list-item__side"><span class="list-item__value">${formatCurrency(e.valor)}</span><span class="badge badge--success">${nomeForma(e.forma)}</span></div>
+                  </li>`;
+                })
+                .join("")
+        }
+      </ul>
+    </div>
+  `;
+
+  const reRender = () => renderRelatorioPagamentos();
+  el.querySelector('[data-action="fechar-relpag"]').addEventListener("click", () => closeOverlay("overlay-relatorio-pagamentos"));
+  document.getElementById("relpag-turno").addEventListener("change", (e) => {
+    definirTurno(e.target.value);
+    reRender();
+  });
+  document.getElementById("relpag-filtro").addEventListener("change", (e) => {
+    f.filtro = e.target.value;
+    reRender();
+  });
+  document.getElementById("relpag-cliente").addEventListener("change", (e) => {
+    f.clienteFiltro = e.target.value;
+    reRender();
+  });
+  document.getElementById("relpag-tipo").addEventListener("change", (e) => {
+    f.tipoFiltro = e.target.value;
+    reRender();
+  });
+  document.getElementById("relpag-forma").addEventListener("change", (e) => {
+    f.formaFiltro = e.target.value;
+    reRender();
+  });
+  document.getElementById("relpag-start")?.addEventListener("change", (e) => {
+    f.customStart = e.target.value;
+    reRender();
+  });
+  document.getElementById("relpag-end")?.addEventListener("change", (e) => {
+    f.customEnd = e.target.value;
+    reRender();
+  });
 }
 
 /* ==========================================================================
