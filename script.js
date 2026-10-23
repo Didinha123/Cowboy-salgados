@@ -151,15 +151,26 @@ function mostrarTelaChave() {
 
 // Dispara uma sincronização sem bloquear a interface (otimista):
 // a tela já foi atualizada com os dados locais; isso só replica pro Sheets.
+// Quantas gravações ainda estão a caminho da planilha. Enquanto houver, NÃO
+// puxamos a planilha de volta: ela ainda não tem o que acabamos de fazer, e
+// puxar agora desfaria na tela (pagamento/venda "voltando") por alguns segundos.
+let gravacoesPendentes = 0;
+let gravacoesDesde = 0; // quando a fila começou (a trava abre sozinha após 2 min, caso uma gravação trave)
+
 function syncInBackground(action, payload) {
   if (!apiUrl) return;
   setSyncStatus("syncing");
+  if (gravacoesPendentes === 0) gravacoesDesde = Date.now();
+  gravacoesPendentes++;
   apiPost(action, payload)
     .then(() => setSyncStatus("online"))
     .catch((err) => {
       console.error("Erro de sincronização:", err);
       setSyncStatus("offline");
       showToast("⚠️ Não sincronizado com a planilha. Os dados ficaram salvos só neste aparelho.");
+    })
+    .finally(() => {
+      gravacoesPendentes = Math.max(0, gravacoesPendentes - 1);
     });
 }
 
@@ -168,6 +179,8 @@ function syncInBackground(action, payload) {
 function syncSequencial(acoes) {
   if (!apiUrl || !acoes.length) return;
   setSyncStatus("syncing");
+  if (gravacoesPendentes === 0) gravacoesDesde = Date.now();
+  gravacoesPendentes++;
   acoes
     .reduce((cadeia, [action, payload]) => cadeia.then(() => apiPost(action, payload)), Promise.resolve())
     .then(() => setSyncStatus("online"))
@@ -175,6 +188,9 @@ function syncSequencial(acoes) {
       console.error("Erro de sincronização:", err);
       setSyncStatus("offline");
       showToast("⚠️ Não sincronizado com a planilha. Os dados ficaram salvos só neste aparelho.");
+    })
+    .finally(() => {
+      gravacoesPendentes = Math.max(0, gravacoesPendentes - 1);
     });
 }
 
@@ -203,6 +219,11 @@ function setSyncStatus(status) {
 // (usado na abertura do app e no botão "Sincronizar agora").
 async function syncFromRemote({ silent = false } = {}) {
   if (!apiUrl) return;
+  if (gravacoesPendentes > 0 && Date.now() - gravacoesDesde < 120000) {
+    // Ainda enviando algo: puxar agora sobrescreveria o que a tela acabou de mostrar.
+    if (!silent) showToast("Aguarde: ainda enviando dados para a planilha...");
+    return;
+  }
   setSyncStatus("syncing");
   try {
     const remote = await apiFetchAll();
@@ -214,6 +235,22 @@ async function syncFromRemote({ silent = false } = {}) {
     if (!remote || !remote.clientes || !remote.vendas || !remote.produtos || !remote.estoque) {
       throw new Error("Resposta da planilha veio incompleta.");
     }
+    // Se uma linha veio repetida (mesmo id duas vezes), conta uma vez só — senão
+    // clientes, vendas e pagamentos aparecem e somam em dobro.
+    const unicos = (lista, chave) => {
+      const vistos = new Set();
+      return (lista || []).filter((x) => {
+        const k = String(x[chave]);
+        if (vistos.has(k)) return false;
+        vistos.add(k);
+        return true;
+      });
+    };
+    remote.clientes = unicos(remote.clientes, "id");
+    remote.vendas = unicos(remote.vendas, "id");
+    remote.itensVenda = unicos(remote.itensVenda, "id");
+    remote.pagamentos = unicos(remote.pagamentos, "id");
+    remote.estoque = unicos(remote.estoque, "produtoId");
     db = {
       ...remote,
       vendas: remote.vendas.map((v) => ({ ...v, dataPrevisaoPagamento: normalizarDataChave(v.dataPrevisaoPagamento) })),
@@ -2262,7 +2299,15 @@ function getUltimaCobranca(cliente) {
 // nas abas Clientes e Fiado.
 function htmlStatusCobranca(cliente) {
   if (!cliente) return "";
-  const enviada = getUltimaCobranca(cliente);
+  let enviada = getUltimaCobranca(cliente);
+  // Se a pessoa acertou (qualquer valor) depois da mensagem, o aviso some.
+  if (enviada) {
+    const quando = new Date(enviada).getTime();
+    const pagouDepois = db.pagamentos.some(
+      (p) => p.clienteId === cliente.id && p.vendaId !== CREDITO_USADO_ID && p.vendaId !== CREDITO_ID && new Date(p.data).getTime() > quando
+    );
+    if (pagouDepois) enviada = null;
+  }
   const pendente = lerCobrancaPendente()?.clienteId === cliente.id;
   return (
     (enviada ? `<span class="list-item__enviado">✅ Mensagem enviada em ${formatDateTime(enviada)}</span>` : "") +
@@ -3486,21 +3531,40 @@ function montarAbaAcerto() {
   document.querySelector('.nav-btn[data-view="fiado"]').insertAdjacentElement("afterend", botao);
 }
 
-// Clientes que devem algo, com os atrasados primeiro e depois o vencimento mais próximo.
+// Chave da pessoa pelo NOME (sem acento, maiúscula ou espaço sobrando): se o mesmo
+// nome foi cadastrado mais de uma vez, é a mesma pessoa e conta uma vez só.
+function chaveNomePessoa(nome) {
+  return String(nome || "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Pessoas que devem algo — uma linha por NOME, somando tudo que ela deve (mesmo que
+// o nome esteja cadastrado mais de uma vez). Atrasados primeiro, depois o vencimento mais próximo.
 function getClientesParaAcerto(busca) {
-  return filtrarClientes(busca)
-    .map((c) => {
-      const pendentes = db.vendas.filter((v) => v.clienteId === c.id && v.formaPagamento === "fiado" && v.valorRestante > 0);
-      const datas = pendentes.map((v) => v.dataPrevisaoPagamento).filter(Boolean).sort();
-      return {
-        cliente: c,
-        saldo: arred2(calcularSaldoCliente(c.id)),
-        credito: getCreditoCliente(c.id),
-        atrasado: pendentes.some((v) => isVendaAtrasada(v)),
-        proximaData: datas[0] || null,
-      };
-    })
-    .filter((e) => e.saldo > 0)
+  const grupos = new Map();
+  filtrarClientes(busca).forEach((c) => {
+    const pendentes = db.vendas.filter((v) => v.clienteId === c.id && v.formaPagamento === "fiado" && v.valorRestante > 0);
+    const saldo = calcularSaldoCliente(c.id);
+    if (saldo <= 0.004) return;
+    const chave = chaveNomePessoa(c.nome);
+    const g = grupos.get(chave) || { chave, nome: c.nome, ids: [], saldo: 0, credito: 0, atrasado: false, datas: [], maisAntiga: Infinity };
+    g.ids.push(c.id);
+    g.saldo += saldo;
+    g.credito += getCreditoCliente(c.id);
+    g.atrasado = g.atrasado || pendentes.some((v) => isVendaAtrasada(v));
+    pendentes.forEach((v) => {
+      if (v.dataPrevisaoPagamento) g.datas.push(v.dataPrevisaoPagamento);
+      g.maisAntiga = Math.min(g.maisAntiga, new Date(v.data).getTime() || Infinity);
+    });
+    grupos.set(chave, g);
+  });
+
+  return [...grupos.values()]
+    .map((g) => ({ ...g, saldo: arred2(g.saldo), credito: arred2(g.credito), proximaData: g.datas.sort()[0] || null }))
     .sort((a, b) => {
       if (a.atrasado !== b.atrasado) return a.atrasado ? -1 : 1;
       if (a.proximaData !== b.proximaData) return !a.proximaData ? 1 : !b.proximaData ? -1 : a.proximaData < b.proximaData ? -1 : 1;
@@ -3520,7 +3584,7 @@ function renderAcerto() {
       <div class="stat-box stat-box--grande"><span>Total a receber</span><strong>${formatCurrency(totalAReceber)}</strong></div>
       <div class="stat-box stat-box--grande stat-box--acertado"><span>✅ Acertado hoje</span><strong>${formatCurrency(getRecebidoFiadoHoje())}</strong></div>
     </div>
-    <p class="acerto-contagem">${todos.length} cliente(s) devendo</p>
+    <p class="acerto-contagem">${todos.length} pessoa(s) devendo</p>
 
     <h3 class="section-subtitle">Receber em:</h3>
     <div class="acerto-formas">
@@ -3557,53 +3621,53 @@ function renderAcertoLista() {
     lista.length === 0
       ? `<li class="empty-state">${acertoUI.busca.trim() ? "Nenhum cliente devendo com essa busca." : "🎉 Ninguém está devendo!"}</li>`
       : lista
-          .map(
-            ({ cliente, saldo, credito, atrasado, proximaData }) => `
-            <li class="acerto-card ${atrasado ? "acerto-card--atrasado" : ""}">
+          .map((e) => {
+            const chave = encodeURIComponent(e.chave);
+            return `
+            <li class="acerto-card ${e.atrasado ? "acerto-card--atrasado" : ""}">
               <div class="acerto-card__topo">
                 <div class="list-item__main">
-                  <strong>${cliente.nome}</strong>
-                  <span class="list-item__meta">${proximaData ? `Vence em ${formatDateOnly(proximaData)}` : "Sem data prevista"}</span>
-                  ${credito > 0 ? `<span class="badge badge--credito">💚 Crédito ${formatCurrency(credito)}</span>` : ""}
+                  <strong>${e.nome}</strong>
+                  <span class="list-item__meta">${e.proximaData ? `Vence em ${formatDateOnly(e.proximaData)}` : "Sem data prevista"}</span>
+                  ${e.credito > 0 ? `<span class="badge badge--credito">💚 Crédito ${formatCurrency(e.credito)}</span>` : ""}
                 </div>
                 <div class="list-item__side">
                   <span class="list-item__value-label">Falta pagar</span>
-                  <span class="list-item__value">${formatCurrency(saldo)}</span>
-                  ${atrasado ? `<span class="badge badge--danger">⏰ Atrasado</span>` : ""}
+                  <span class="list-item__value">${formatCurrency(e.saldo)}</span>
+                  ${e.atrasado ? `<span class="badge badge--danger">⏰ Atrasado</span>` : ""}
                 </div>
               </div>
               <div class="acerto-card__acoes">
-                <button type="button" class="btn btn--primary" data-acerto="quitar" data-cliente-id="${cliente.id}">✅ Receber tudo ${formatCurrency(saldo)}</button>
-                <button type="button" class="btn btn--secondary" data-acerto="parcial" data-cliente-id="${cliente.id}">Outro valor</button>
-                ${credito > 0 ? `<button type="button" class="btn btn--secondary" data-acerto="credito" data-cliente-id="${cliente.id}">💚 Usar crédito</button>` : ""}
+                <button type="button" class="btn btn--primary" data-acerto="quitar" data-chave="${chave}">✅ Receber tudo ${formatCurrency(e.saldo)}</button>
+                <button type="button" class="btn btn--secondary" data-acerto="parcial" data-chave="${chave}">Outro valor</button>
+                ${e.credito > 0 ? `<button type="button" class="btn btn--secondary" data-acerto="credito" data-chave="${chave}">💚 Usar crédito</button>` : ""}
               </div>
-            </li>`
-          )
+            </li>`;
+          })
           .join("");
 
   ul.querySelectorAll("[data-acerto]").forEach((btn) => {
-    btn.addEventListener("click", () => acertoAcao(btn.dataset.acerto, btn.dataset.clienteId));
+    btn.addEventListener("click", () => acertoAcao(btn.dataset.acerto, decodeURIComponent(btn.dataset.chave)));
   });
 }
 
-function acertoAcao(acao, clienteId) {
-  const cliente = getCliente(clienteId);
-  if (!cliente) return;
-  const saldo = arred2(calcularSaldoCliente(clienteId));
+function acertoAcao(acao, chave) {
+  const entrada = getClientesParaAcerto("").find((e) => e.chave === chave);
+  if (!entrada) return;
   const forma = FORMAS_PAGAMENTO_VISTA.find((m) => m.id === acertoUI.forma);
 
   if (acao === "quitar") {
     openConfirm({
       title: "💰 Receber pagamento",
-      message: `<strong>${cliente.nome}</strong>\nReceber <strong>${formatCurrency(saldo)}</strong> em ${forma.label}?\nA dívida é quitada na hora.`,
+      message: `<strong>${entrada.nome}</strong>\nReceber <strong>${formatCurrency(entrada.saldo)}</strong> em ${forma.label}?\nA dívida é quitada na hora.`,
       confirmText: "Receber",
-      onConfirm: () => acertoReceber(cliente, saldo),
+      onConfirm: () => acertoReceber(entrada, entrada.saldo),
     });
   } else if (acao === "parcial") {
     openPrompt({
-      title: `💰 Receber de ${cliente.nome}`,
+      title: `💰 Receber de ${entrada.nome}`,
       fields: [
-        { id: "valor", label: `Valor recebido em ${forma.label} (deve: ${formatCurrency(saldo)})`, type: "number", inputmode: "decimal", step: "0.01", placeholder: "0,00" },
+        { id: "valor", label: `Valor recebido em ${forma.label} (deve: ${formatCurrency(entrada.saldo)})`, type: "number", inputmode: "decimal", step: "0.01", placeholder: "0,00" },
       ],
       confirmText: "Receber",
       onSubmit: (values) => {
@@ -3611,24 +3675,46 @@ function acertoAcao(acao, clienteId) {
           showToast("Informe um valor válido.");
           return;
         }
-        acertoReceber(cliente, values.valor);
+        acertoReceber(entrada, values.valor);
       },
     });
   } else if (acao === "credito") {
-    const usado = usarCreditoCliente(clienteId);
+    const usado = arred2(entrada.ids.reduce((s, id) => s + usarCreditoCliente(id), 0));
     showToast(`💚 ${formatCurrency(usado)} de crédito abatido da dívida.`);
     renderAcerto();
   }
 }
 
 // Registra o pagamento (abate a dívida automaticamente, vendas mais antigas
-// primeiro) e mostra o resumo grande de sempre.
-function acertoReceber(cliente, valor) {
-  const saldoAntes = calcularSaldoCliente(cliente.id);
-  const resultado = registrarPagamento(cliente.id, valor, acertoUI.forma);
-  const novoSaldo = calcularSaldoCliente(cliente.id);
+// primeiro) e mostra o resumo grande de sempre. Se a pessoa estiver cadastrada
+// mais de uma vez com o mesmo nome, o valor é repartido entre os cadastros.
+function acertoReceber(entrada, valor) {
+  const saldoAntes = entrada.ids.reduce((s, id) => s + calcularSaldoCliente(id), 0);
+  let restante = arred2(valor);
+  let recebido = 0;
+  let sobra = 0;
+
+  entrada.ids.forEach((id, i) => {
+    if (restante <= 0) return;
+    const ultimo = i === entrada.ids.length - 1;
+    // No último cadastro vai tudo que sobrou: o que passar da dívida vira crédito dele.
+    const parte = ultimo ? restante : Math.min(restante, arred2(calcularSaldoCliente(id)));
+    if (parte <= 0) return;
+    const r = registrarPagamento(id, parte, acertoUI.forma);
+    recebido += r.valorRecebido;
+    sobra += r.sobra;
+    restante = arred2(restante - parte);
+  });
+
+  const novoSaldo = entrada.ids.reduce((s, id) => s + calcularSaldoCliente(id), 0);
   renderAcerto();
-  mostrarResumoPagamento({ cliente, saldoAntes, valorPago: resultado.valorRecebido, novoSaldo, sobra: resultado.sobra });
+  mostrarResumoPagamento({
+    cliente: { nome: entrada.nome },
+    saldoAntes: arred2(saldoAntes),
+    valorPago: arred2(recebido),
+    novoSaldo: arred2(novoSaldo),
+    sobra: arred2(sobra),
+  });
 }
 
 /* ==========================================================================
@@ -3662,11 +3748,14 @@ function gerarRelatorioPagamentos({ filtro, customStart, customEnd, clienteFiltr
 
   const pessoas = new Map();
   eventos.forEach((e) => {
-    const acc = pessoas.get(e.clienteId) || { nome: getCliente(e.clienteId)?.nome || "Cliente", total: 0, quantidade: 0, ultima: 0 };
+    // Por nome: a mesma pessoa cadastrada duas vezes conta uma vez só.
+    const nome = getCliente(e.clienteId)?.nome || "Cliente";
+    const chave = chaveNomePessoa(nome);
+    const acc = pessoas.get(chave) || { nome, total: 0, quantidade: 0, ultima: 0 };
     acc.total += e.valor;
     acc.quantidade += 1;
     acc.ultima = Math.max(acc.ultima, new Date(e.data).getTime() || 0);
-    pessoas.set(e.clienteId, acc);
+    pessoas.set(chave, acc);
   });
 
   return {
