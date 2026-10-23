@@ -3821,48 +3821,18 @@ function renderRelatorioPagamentos() {
             </div>`
           : ""
       }
-      <div class="stat-row stat-row--2">
-        <div class="form-field">
-          <label for="relpag-cliente">Cliente</label>
-          <select id="relpag-cliente">
-            <option value="">Todos</option>
-            ${clientesOrdenados.map((c) => `<option value="${c.id}" ${sel(f.clienteFiltro === c.id)}>${c.nome}</option>`).join("")}
-          </select>
-        </div>
-        <div class="form-field">
-          <label for="relpag-forma">Forma</label>
-          <select id="relpag-forma">
-            <option value="">Todas</option>
-            ${FORMAS_PAGAMENTO_VISTA.map((m) => `<option value="${m.id}" ${sel(f.formaFiltro === m.id)}>${m.label}</option>`).join("")}
-          </select>
-        </div>
+      <div class="form-field">
+        <label for="relpag-cliente">Cliente</label>
+        <select id="relpag-cliente">
+          <option value="">Todos</option>
+          ${clientesOrdenados.map((c) => `<option value="${c.id}" ${sel(f.clienteFiltro === c.id)}>${c.nome}</option>`).join("")}
+        </select>
       </div>
 
       <div class="stat-row stat-row--2">
         <div class="stat-box stat-box--grande"><span>👥 Pessoas que pagaram</span><strong>${r.pessoas.length}</strong></div>
         <div class="stat-box stat-box--grande stat-box--acertado"><span>💵 Total acertado</span><strong>${formatCurrency(r.total)}</strong></div>
       </div>
-
-      <h4 class="section-subtitle">Formas de pagamento</h4>
-      <ul class="stat-list">
-        ${r.formas.length === 0 ? `<li><span>Nenhum pagamento no período</span><strong>—</strong></li>` : r.formas.map((x) => `<li><span>${nomeForma(x.forma)}</span><strong>${formatCurrency(x.total)}</strong></li>`).join("")}
-      </ul>
-
-      <h4 class="section-subtitle">Por pessoa (${r.pessoas.length})</h4>
-      <ul class="list">
-        ${
-          r.pessoas.length === 0
-            ? `<li class="empty-state">Ninguém pagou dívida nesse período.</li>`
-            : r.pessoas
-                .map(
-                  (p) => `<li class="list-item">
-                    <div class="list-item__main"><strong>${p.nome}</strong><span class="list-item__meta">${p.quantidade} pagamento${p.quantidade > 1 ? "s" : ""} · último em ${formatDateTime(new Date(p.ultima).toISOString())}</span></div>
-                    <div class="list-item__side"><span class="list-item__value">${formatCurrency(p.total)}</span></div>
-                  </li>`
-                )
-                .join("")
-        }
-      </ul>
 
       <h4 class="section-subtitle">Histórico de pagamentos (${r.eventos.length})</h4>
       <ul class="list">
@@ -3874,7 +3844,7 @@ function renderRelatorioPagamentos() {
                   const nome = getCliente(e.clienteId)?.nome || "Cliente";
                   return `<li class="list-item">
                     <div class="list-item__main"><strong>${nome}</strong><span class="list-item__meta">${formatDateTime(e.data)}</span></div>
-                    <div class="list-item__side"><span class="list-item__value">${formatCurrency(e.valor)}</span><span class="badge badge--success">${nomeForma(e.formaPagamento)}</span></div>
+                    <div class="list-item__side"><span class="list-item__value">${formatCurrency(e.valor)}</span></div>
                   </li>`;
                 })
                 .join("")
@@ -3895,10 +3865,6 @@ function renderRelatorioPagamentos() {
   });
   document.getElementById("relpag-cliente").addEventListener("change", (e) => {
     f.clienteFiltro = e.target.value;
-    reRender();
-  });
-  document.getElementById("relpag-forma").addEventListener("change", (e) => {
-    f.formaFiltro = e.target.value;
     reRender();
   });
   document.getElementById("relpag-start")?.addEventListener("change", (e) => {
