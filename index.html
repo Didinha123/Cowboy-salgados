@@ -1,20 +1,28 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
-
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
-  <meta name="theme-color" content="#8a4b2f" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#084a5e" />
+  <meta name="color-scheme" content="light dark" />
   <title>Cowboy Salgados</title>
-  <link rel="stylesheet" href="style.css" />
+  <script>try{var t=localStorage.getItem('cowboySalgadosTema_v1');if(t)document.documentElement.setAttribute('data-tema',t);}catch(e){}</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=20261017" />
 </head>
-
 <body>
   <div class="app">
 
     <header class="topbar">
-      <div class="topbar__brand">🤠 <span id="business-name-header">Cowboy Salgados</span></div>
-      <button id="btn-settings" class="icon-btn" aria-label="Configurações">⚙️</button>
+      <div class="topbar__brand"><span class="topbar__logo">🤠</span><span id="business-name-header">Cowboy Salgados</span></div>
+      <div class="topbar__actions">
+        <button id="sync-badge" class="sync-badge hidden" aria-label="Status de sincronização"></button>
+        <button id="btn-settings" class="icon-btn" aria-label="Configurações">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </button>
+      </div>
     </header>
 
     <main class="views">
@@ -26,12 +34,11 @@
     </main>
 
     <nav class="bottom-nav">
-      <button class="nav-btn active" data-view="inicio"><span
-          class="nav-btn__icon">🏠</span><span>Início</span></button>
-      <button class="nav-btn" data-view="venda"><span class="nav-btn__icon">🛒</span><span>Venda</span></button>
-      <button class="nav-btn" data-view="clientes"><span class="nav-btn__icon">👥</span><span>Clientes</span></button>
-      <button class="nav-btn" data-view="fiado"><span class="nav-btn__icon">📒</span><span>Fiado</span></button>
-      <button class="nav-btn" data-view="estoque"><span class="nav-btn__icon">📦</span><span>Estoque</span></button>
+      <button class="nav-btn active" data-view="inicio"><span class="nav-btn__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg></span><span>Início</span></button>
+      <button class="nav-btn" data-view="venda"><span class="nav-btn__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="20" r="1.4"/><circle cx="18" cy="20" r="1.4"/><path d="M2 3h3l2.7 12.4a1 1 0 0 0 1 .8h8.9a1 1 0 0 0 1-.8L20.5 7H6"/></svg></span><span>Venda</span></button>
+      <button class="nav-btn" data-view="clientes"><span class="nav-btn__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8"/><path d="M18 14.2A6.5 6.5 0 0 1 21.5 20"/></svg></span><span>Clientes</span></button>
+      <button class="nav-btn" data-view="fiado"><span class="nav-btn__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h11a3 3 0 0 1 3 3v13H8a3 3 0 0 1-3-3z"/><path d="M5 17a3 3 0 0 1 3-3h11"/><path d="M9 8h6"/></svg></span><span>Fiado</span></button>
+      <button class="nav-btn" data-view="estoque"><span class="nav-btn__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="m3 8 9 5 9-5"/><path d="M12 13v8"/></svg></span><span>Estoque</span></button>
     </nav>
 
     <!-- Overlays em tela cheia -->
@@ -67,7 +74,6 @@
     <div id="toast" class="toast hidden"></div>
   </div>
 
-  <script src="script.js"></script>
+  <script src="script.js?v=20261017"></script>
 </body>
-
 </html>
