@@ -67,7 +67,7 @@ function generateId(prefix) {
 // aparelhos por causa disso. Sem "cada aparelho guarda sua própria URL",
 // esse jeito de dessincronizar não existe mais.
 const DEFAULT_API_URL =
-  "https://script.google.com/macros/s/AKfycbxakb70vpYvvZfuEgDFTHG-6D4SQBoVpRqj5ntsZ-VDHuxrP9UutD4wOhuIIRXvhEHDCA/exec";
+  "https://script.google.com/macros/s/AKfycby7gdpXO1dJdiTK4Buyv9XDROx1NJOVB9qyQrUd_TAFgK883Qr9MVg79Nq3fxcbIG7Ehw/exec";
 let apiUrl = "";
 let lastSyncAt = null;
 
