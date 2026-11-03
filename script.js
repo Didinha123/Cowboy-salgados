@@ -153,9 +153,9 @@ async function apiPost(action, payload) {
    é o login — só o usuário da equipe consegue ler e gravar.
    ========================================================================== */
 
-const SUPABASE_URL = ""; // ex.: "https://abcdefgh.supabase.co"
-const SUPABASE_ANON_KEY = ""; // chave pública (anon / publishable) — nunca a service_role
-const SUPABASE_EMAIL = ""; // e-mail do usuário único da equipe (a senha é digitada no app)
+const SUPABASE_URL = "https://pznccjxpvesdogykqfnw.supabase.co"; // ex.: "https://abcdefgh.supabase.co"
+const SUPABASE_ANON_KEY = "sb_publishable_JtfblayNSjzPmh9vpHX-ng_LnoLZygH"; // chave pública (anon / publishable) — nunca a service_role
+const SUPABASE_EMAIL = "diegoespedito63@gmail.com"; // e-mail do usuário único da equipe (a senha é digitada no app)
 
 function usandoSupabase() {
   return !!(SUPABASE_URL && SUPABASE_ANON_KEY && SUPABASE_EMAIL);
@@ -631,7 +631,19 @@ async function syncFromRemote({ silent = false } = {}) {
       oferecerMigracaoParaSupabase();
       return;
     }
+    // Aparelho que ainda guarda dados vindos da PLANILHA (nunca puxou do banco) e
+    // tem coisa mais nova que o banco: oferece enviar antes de trocar pelo banco,
+    // senão o que foi lançado depois da primeira migração se perderia.
+    if (usandoSupabase() && db.origem !== "supabase") {
+      const falta = sbDiferencaLocal(remote);
+      if (falta.total > 0) {
+        setSyncStatus("online");
+        oferecerEnvioDiferenca(falta);
+        return;
+      }
+    }
     db = {
+      origem: usandoSupabase() ? "supabase" : "planilha",
       ...remote,
       vendas: remote.vendas.map((v) => ({ ...v, dataPrevisaoPagamento: normalizarDataChave(v.dataPrevisaoPagamento) })),
       configuracoes: remote.configuracoes || { ...DEFAULT_CONFIGURACOES },
@@ -659,6 +671,54 @@ function sbBancoVazio(remote) {
 
 function aparelhoTemDadosReais() {
   return db.vendas.length > 0 || db.clientes.some((c) => c.id !== CLIENTE_AVULSO_ID);
+}
+
+// O que este aparelho tem a mais (ou mais novo) do que o banco.
+function sbDiferencaLocal(remote) {
+  const ids = (lista) => new Set(lista.map((x) => x.id));
+  const rc = ids(remote.clientes);
+  const rv = ids(remote.vendas);
+  const rp = ids(remote.pagamentos);
+  const vendasRemotas = new Map(remote.vendas.map((v) => [v.id, v]));
+  const clientes = db.clientes.filter((c) => !rc.has(c.id)).length;
+  const vendas = db.vendas.filter((v) => !rv.has(v.id)).length;
+  const pagamentos = db.pagamentos.filter((p) => !rp.has(p.id)).length;
+  const alteradas = db.vendas.filter((v) => {
+    const r = vendasRemotas.get(v.id);
+    return r && (arred2(r.valorPago) !== arred2(v.valorPago) || arred2(r.valorRestante) !== arred2(v.valorRestante) || r.status !== v.status);
+  }).length;
+  return { clientes, vendas, pagamentos, alteradas, total: clientes + vendas + pagamentos + alteradas };
+}
+
+function oferecerEnvioDiferenca(f) {
+  if (migracaoEmAndamento) return;
+  migracaoEmAndamento = true;
+  const partes = [];
+  if (f.clientes) partes.push(`${f.clientes} cliente(s) novo(s)`);
+  if (f.vendas) partes.push(`${f.vendas} venda(s) nova(s)`);
+  if (f.pagamentos) partes.push(`${f.pagamentos} pagamento(s) novo(s)`);
+  if (f.alteradas) partes.push(`${f.alteradas} venda(s) com valores diferentes`);
+  openConfirm({
+    title: "📦 Enviar dados mais novos para o banco?",
+    message:
+      `Este aparelho ainda tem dados da planilha que o banco não tem: ${partes.join(", ")}.\n` +
+      `Enviar agora, antes de usar o banco? Confirme só se este aparelho foi o último a sincronizar com a planilha.`,
+    confirmText: "Enviar agora",
+    cancelText: "Agora não",
+    onConfirm: async () => {
+      showToast("Enviando dados para o banco...");
+      try {
+        await enviarTudoParaPlanilha();
+        migracaoEmAndamento = false;
+        await syncFromRemote();
+        showToast("✅ Dados enviados para o banco!");
+      } catch (err) {
+        console.error("Erro ao enviar a diferença:", err);
+        migracaoEmAndamento = false;
+        showToast("⚠️ Não consegui enviar os dados: " + (err.message || "erro desconhecido"));
+      }
+    },
+  });
 }
 
 let migracaoEmAndamento = false;
