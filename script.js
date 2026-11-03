@@ -72,32 +72,33 @@ let apiUrl = "";
 let lastSyncAt = null;
 
 function loadApiUrl() {
-  apiUrl = DEFAULT_API_URL;
+  // Com o Supabase configurado ele é o banco; senão continua a planilha do Google.
+  apiUrl = usandoSupabase() ? SUPABASE_URL : DEFAULT_API_URL;
 }
 
 // Cores do app: a paleta escolhida fica guardada neste aparelho e vale pro
-// visual todo (o CSS lê o atributo data-tema). O padrão é o azul-petróleo.
+// visual todo (o CSS lê o atributo data-tema). O padrão é a terracota (visual original).
 const TEMA_KEY = "cowboySalgadosTema_v1";
 const TEMAS = [
+  { id: "terracota", nome: "Terracota (original)", cor: "#b0452a" },
   { id: "petroleo", nome: "Azul-petróleo", cor: "#0e6b86" },
   { id: "marinho", nome: "Azul-marinho", cor: "#2b4a8b" },
   { id: "grafite", nome: "Grafite", cor: "#2f3b48" },
   { id: "esmeralda", nome: "Esmeralda", cor: "#0f7a5c" },
-  { id: "terracota", nome: "Terracota", cor: "#b0452a" },
 ];
 
 function getTema() {
   const salvo = localStorage.getItem(TEMA_KEY);
-  return TEMAS.some((t) => t.id === salvo) ? salvo : "petroleo";
+  return TEMAS.some((t) => t.id === salvo) ? salvo : "terracota";
 }
 
 function aplicarTema(id) {
-  if (!TEMAS.some((t) => t.id === id)) id = "petroleo";
+  if (!TEMAS.some((t) => t.id === id)) id = "terracota";
   localStorage.setItem(TEMA_KEY, id);
   document.documentElement.dataset.tema = id;
   // cor da barra do navegador no celular acompanha a paleta
   const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute("content", getComputedStyle(document.documentElement).getPropertyValue("--primary-dark").trim() || "#084a5e");
+  if (meta) meta.setAttribute("content", getComputedStyle(document.documentElement).getPropertyValue("--primary-dark").trim() || "#7a2d19");
 }
 
 // Chave de acesso: a URL acima fica num site público, então o Apps Script
@@ -112,6 +113,7 @@ function getChaveAcesso() {
 
 // Busca o estado completo da planilha (fonte de verdade quando conectado).
 async function apiFetchAll() {
+  if (usandoSupabase()) return sbBuscarTudo();
   const res = await fetch(`${apiUrl}?action=getAll&chave=${encodeURIComponent(getChaveAcesso())}`);
   if (!res.ok) throw new Error("Falha ao consultar a planilha.");
   const json = await res.json();
@@ -126,6 +128,7 @@ async function apiFetchAll() {
 // IMPORTANTE: usar Content-Type "text/plain" evita que o navegador dispare
 // um preflight CORS (OPTIONS) — o Apps Script não sabe responder a ele.
 async function apiPost(action, payload) {
+  if (usandoSupabase()) return sbPost(action, payload);
   const res = await fetch(apiUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
@@ -138,6 +141,350 @@ async function apiPost(action, payload) {
   }
   if (!json.ok) throw new Error(json.error || "Falha ao sincronizar com a planilha.");
   return json;
+}
+
+/* ==========================================================================
+   BANCO NO SUPABASE
+   Quando SUPABASE_URL / SUPABASE_ANON_KEY / SUPABASE_EMAIL estão preenchidos, o app
+   conversa com o Supabase em vez do Apps Script/planilha. O resto do app não
+   muda: as mesmas "ações" (upsert, excluirVenda, registrarVenda...) são
+   traduzidas aqui pra chamadas na API do banco.
+   A chave "anon" é pública de propósito (fica no site): quem protege os dados
+   é o login — só o usuário da equipe consegue ler e gravar.
+   ========================================================================== */
+
+const SUPABASE_URL = ""; // ex.: "https://abcdefgh.supabase.co"
+const SUPABASE_ANON_KEY = ""; // chave pública (anon / publishable) — nunca a service_role
+const SUPABASE_EMAIL = ""; // e-mail do usuário único da equipe (a senha é digitada no app)
+
+function usandoSupabase() {
+  return !!(SUPABASE_URL && SUPABASE_ANON_KEY && SUPABASE_EMAIL);
+}
+
+const SB_SESSAO_KEY = "cowboySalgadosSupabaseSessao_v1";
+
+// Como cada "aba" da planilha vira tabela no banco. "anulaveis" podem ficar
+// vazias (null); os demais campos vazios são simplesmente omitidos.
+const SB_TABELAS = {
+  Clientes: {
+    tabela: "clientes", chave: "id",
+    colunas: ["id", "nome", "telefone", "observacao", "fixo", "createdAt", "credito", "ultimaCobranca"],
+    anulaveis: ["ultimaCobranca"], datas: ["createdAt", "ultimaCobranca"], numeros: ["credito"],
+  },
+  Produtos: {
+    tabela: "produtos", chave: "id",
+    colunas: ["id", "nome", "tipo", "unidade", "icon"], anulaveis: [], datas: [], numeros: [],
+  },
+  Vendas: {
+    tabela: "vendas", chave: "id",
+    colunas: ["id", "clienteId", "data", "formaPagamento", "valorTotal", "valorPago", "valorRestante", "status", "dataPrevisaoPagamento", "dataPagamento", "descricao"],
+    anulaveis: ["dataPrevisaoPagamento", "dataPagamento", "descricao"], datas: ["data", "dataPagamento"],
+    numeros: ["valorTotal", "valorPago", "valorRestante"],
+  },
+  ItensVenda: {
+    tabela: "itens_venda", chave: "id",
+    colunas: ["id", "vendaId", "produtoId", "quantidade", "valorTotal"], anulaveis: [], datas: [], numeros: ["quantidade", "valorTotal"],
+  },
+  Pagamentos: {
+    tabela: "pagamentos", chave: "id",
+    colunas: ["id", "clienteId", "vendaId", "valor", "formaPagamento", "data"],
+    anulaveis: ["vendaId", "formaPagamento"], datas: ["data"], numeros: ["valor"],
+  },
+  Estoque: {
+    tabela: "estoque", chave: "produtoId",
+    colunas: ["produtoId", "quantidadeAtual", "estoqueMinimo"], anulaveis: [], datas: [], numeros: ["quantidadeAtual", "estoqueMinimo"],
+  },
+  Configuracoes: {
+    tabela: "configuracoes", chave: "chave", colunas: ["chave", "valor"], anulaveis: ["valor"], datas: [], numeros: [],
+  },
+};
+
+// ---- sessão (login da equipe) ----
+
+function sbLerSessao() {
+  try {
+    return JSON.parse(localStorage.getItem(SB_SESSAO_KEY));
+  } catch (e) {
+    return null;
+  }
+}
+
+function sbSalvarSessao(j) {
+  localStorage.setItem(
+    SB_SESSAO_KEY,
+    JSON.stringify({
+      access_token: j.access_token,
+      refresh_token: j.refresh_token,
+      expires_at: j.expires_at || Math.floor(Date.now() / 1000) + (j.expires_in || 3600),
+    })
+  );
+}
+
+async function sbEntrar(senha) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+    method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ email: SUPABASE_EMAIL, password: senha }),
+  });
+  if (!res.ok) return false;
+  sbSalvarSessao(await res.json());
+  return true;
+}
+
+// Devolve um token válido (renova sozinho quando está perto de vencer) ou null.
+async function sbToken() {
+  const s = sbLerSessao();
+  if (!s || !s.access_token) return null;
+  if (s.expires_at * 1000 - Date.now() > 60 * 1000) return s.access_token;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: s.refresh_token }),
+    });
+    if (!res.ok) {
+      localStorage.removeItem(SB_SESSAO_KEY);
+      return null;
+    }
+    const j = await res.json();
+    sbSalvarSessao(j);
+    return j.access_token;
+  } catch (e) {
+    return s.access_token; // sem internet: tenta com o que tem (o servidor recusa se já venceu)
+  }
+}
+
+// Chamada à API do banco já com a chave e o login.
+async function sbFetch(caminho, opcoes = {}) {
+  const token = await sbToken();
+  if (!token) {
+    mostrarTelaSenha();
+    throw new Error("Sessão expirada: digite a senha da equipe.");
+  }
+  const res = await fetch(`${SUPABASE_URL}${caminho}`, {
+    ...opcoes,
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(opcoes.headers || {}) },
+  });
+  if (res.status === 401) {
+    localStorage.removeItem(SB_SESSAO_KEY);
+    mostrarTelaSenha();
+    throw new Error("Sessão expirada: digite a senha da equipe.");
+  }
+  if (!res.ok) {
+    let detalhe = "";
+    try {
+      const j = await res.json();
+      detalhe = j.message || j.error || "";
+    } catch (e) {
+      /* sem corpo */
+    }
+    throw new Error(`Banco recusou (${res.status}) ${detalhe}`.trim());
+  }
+  return res;
+}
+
+// ---- leitura ----
+
+function sbLinhaDoBanco(def, linha) {
+  const out = { ...linha };
+  def.datas.forEach((c) => {
+    if (out[c] && !/^\d{4}-\d{2}-\d{2}$/.test(out[c])) out[c] = new Date(out[c]).toISOString();
+  });
+  def.numeros.forEach((c) => {
+    if (out[c] !== null && out[c] !== undefined) out[c] = Number(out[c]);
+  });
+  return out;
+}
+
+async function sbBuscarTabela(sheet) {
+  const def = SB_TABELAS[sheet];
+  const passo = 1000; // o banco devolve no máximo 1000 linhas por pedido
+  const linhas = [];
+  for (let ini = 0; ; ini += passo) {
+    const res = await sbFetch(`/rest/v1/${def.tabela}?select=*&order=${def.chave}`, {
+      headers: { "Range-Unit": "items", Range: `${ini}-${ini + passo - 1}` },
+    });
+    const parte = await res.json();
+    linhas.push(...parte);
+    if (parte.length < passo) break;
+  }
+  return linhas.map((l) => sbLinhaDoBanco(def, l));
+}
+
+async function sbBuscarTudo() {
+  const [clientes, produtos, vendas, itensVenda, pagamentos, estoque, cfg] = await Promise.all(
+    ["Clientes", "Produtos", "Vendas", "ItensVenda", "Pagamentos", "Estoque", "Configuracoes"].map(sbBuscarTabela)
+  );
+  const configuracoes = {};
+  cfg.forEach((r) => {
+    const n = Number(r.valor);
+    configuracoes[r.chave] = r.valor !== null && r.valor !== "" && !isNaN(n) ? n : r.valor;
+  });
+  return { clientes, produtos, vendas, itensVenda, pagamentos, estoque, configuracoes };
+}
+
+// ---- escrita ----
+
+// Deixa a linha do app só com as colunas que existem no banco, no formato certo.
+function sbLinhaParaBanco(def, row) {
+  const out = {};
+  def.colunas.forEach((c) => {
+    let v = row[c];
+    if (v === undefined) return;
+    if (v === "" && (def.datas.includes(c) || def.anulaveis.includes(c))) v = null;
+    if (v === null && !def.anulaveis.includes(c)) return;
+    if (def.tabela === "configuracoes" && c === "valor" && v !== null) v = String(v);
+    out[c] = v;
+  });
+  return out;
+}
+
+// Grava (insere ou atualiza) várias linhas. Linhas com conjuntos de campos
+// diferentes vão em pedidos separados, pra uma linha sem um campo não zerar o
+// campo das outras.
+async function sbGravar(sheet, rows) {
+  const def = SB_TABELAS[sheet];
+  const grupos = new Map();
+  (rows || []).forEach((r) => {
+    const linha = sbLinhaParaBanco(def, r);
+    const assinatura = Object.keys(linha).sort().join("|");
+    if (!grupos.has(assinatura)) grupos.set(assinatura, []);
+    grupos.get(assinatura).push(linha);
+  });
+  for (const linhas of grupos.values()) {
+    for (let i = 0; i < linhas.length; i += 500) {
+      await sbFetch(`/rest/v1/${def.tabela}?on_conflict=${def.chave}`, {
+        method: "POST",
+        headers: { Prefer: "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify(linhas.slice(i, i + 500)),
+      });
+    }
+  }
+}
+
+async function sbApagar(sheet, id) {
+  const def = SB_TABELAS[sheet];
+  await sbFetch(`/rest/v1/${def.tabela}?${def.chave}=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
+}
+
+async function sbDeltasEstoque(deltas) {
+  if (!deltas || !deltas.length) return;
+  await sbFetch("/rest/v1/rpc/aplicar_deltas_estoque", { method: "POST", body: JSON.stringify({ p_deltas: deltas }) });
+}
+
+// Traduz uma "ação" do app (as mesmas do Apps Script) em chamadas ao banco.
+async function sbPost(action, p) {
+  if (action === "upsert") {
+    await sbGravar(p.sheet, [p.row]);
+  } else if (action === "deletar") {
+    await sbApagar(p.sheet, p.id);
+  } else if (action === "registrarVenda") {
+    await sbGravar("Vendas", [p.venda]);
+    await sbGravar("ItensVenda", p.itens);
+    await sbDeltasEstoque(p.estoqueDelta);
+  } else if (action === "excluirVenda") {
+    await sbApagar("Vendas", p.vendaId); // os itens saem junto (ON DELETE CASCADE)
+    await sbDeltasEstoque(p.estoqueDelta);
+  } else if (action === "excluirCliente") {
+    await sbApagar("Clientes", p.clienteId); // vendas, itens e pagamentos saem junto
+    await sbDeltasEstoque(p.estoqueDelta);
+  } else if (action === "registrarPagamento") {
+    await sbGravar("Pagamentos", [p.pagamento]);
+    await sbGravar("Vendas", p.vendasAtualizadas);
+  } else if (action === "ajustarEstoque") {
+    await sbDeltasEstoque(p.estoqueDelta);
+  } else if (action === "estoqueMinimo") {
+    await sbFetch(`/rest/v1/estoque?produtoId=eq.${encodeURIComponent(p.produtoId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ estoqueMinimo: Number(p.estoqueMinimo) || 0 }),
+    });
+  } else if (action === "saveConfig") {
+    await sbGravar("Configuracoes", Object.entries(p.config || {}).map(([chave, valor]) => ({ chave, valor })));
+  } else if (action === "resetAll") {
+    // zera movimento e clientes (só o Cliente Avulso fica) e o estoque volta a 0
+    await sbFetch("/rest/v1/pagamentos?id=not.is.null", { method: "DELETE" });
+    await sbFetch("/rest/v1/vendas?id=not.is.null", { method: "DELETE" });
+    await sbFetch(`/rest/v1/clientes?id=neq.${CLIENTE_AVULSO_ID}`, { method: "DELETE" });
+    await sbFetch("/rest/v1/estoque?produtoId=not.is.null", { method: "PATCH", body: JSON.stringify({ quantidadeAtual: 0 }) });
+  } else if (action === "importarTudo") {
+    await sbImportar(p);
+  } else {
+    throw new Error(`Ação desconhecida: ${action}`);
+  }
+  return { ok: true };
+}
+
+// Envia de uma vez o que está neste aparelho (usado na migração da planilha).
+// Só INSERE/ATUALIZA — nunca apaga nada no banco. Linhas "soltas" (que apontam
+// pra cliente/venda que não existe mais) ficam de fora pra não travar o envio.
+async function sbImportar(p) {
+  const idsClientes = new Set((p.clientes || []).map((c) => c.id));
+  const vendas = (p.vendas || []).filter((v) => idsClientes.has(v.clienteId));
+  const idsVendas = new Set(vendas.map((v) => v.id));
+  const itens = (p.itensVenda || []).filter((i) => idsVendas.has(i.vendaId));
+  const pagamentos = (p.pagamentos || []).filter((x) => idsClientes.has(x.clienteId));
+
+  await sbGravar("Clientes", p.clientes);
+  await sbGravar("Vendas", vendas);
+  await sbGravar("ItensVenda", itens);
+  await sbGravar("Pagamentos", pagamentos);
+  await sbGravar("Estoque", p.estoque);
+  await sbGravar("Configuracoes", Object.entries(p.configuracoes || {}).map(([chave, valor]) => ({ chave, valor })));
+}
+
+// Tela pedindo a senha da equipe (login) — some quando a senha estiver certa.
+let tentouSenha = false;
+function mostrarTelaSenha() {
+  if (document.getElementById("tela-chave")) return;
+  const tela = document.createElement("div");
+  tela.id = "tela-chave";
+  tela.className = "tela-chave";
+  tela.innerHTML = `
+    <div class="tela-chave__card">
+      <div class="tela-chave__icone">🔒</div>
+      <h2>Cowboy Salgados</h2>
+      <p>Digite a senha da equipe para entrar.</p>
+      <input type="password" id="tela-chave-input" placeholder="Senha da equipe" autocomplete="current-password" />
+      <p class="texto-erro" id="tela-chave-erro">${tentouSenha ? "Senha incorreta. Tente de novo." : ""}</p>
+      <button type="button" class="btn btn--primary btn--block btn--xl" id="tela-chave-btn">Entrar</button>
+    </div>
+  `;
+  document.body.appendChild(tela);
+
+  const input = document.getElementById("tela-chave-input");
+  const botao = document.getElementById("tela-chave-btn");
+  const erro = document.getElementById("tela-chave-erro");
+  const entrar = async () => {
+    const valor = input.value;
+    if (!valor) return;
+    botao.disabled = true;
+    botao.textContent = "Entrando...";
+    let ok = false;
+    try {
+      ok = await sbEntrar(valor);
+    } catch (e) {
+      erro.textContent = "Sem conexão. Verifique a internet e tente de novo.";
+      botao.disabled = false;
+      botao.textContent = "Entrar";
+      return;
+    }
+    if (ok) {
+      tela.remove();
+      tentouSenha = false;
+      syncFromRemote({ silent: true });
+    } else {
+      tentouSenha = true;
+      erro.textContent = "Senha incorreta. Tente de novo.";
+      botao.disabled = false;
+      botao.textContent = "Entrar";
+      input.select();
+    }
+  };
+  botao.addEventListener("click", entrar);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") entrar();
+  });
+  input.focus();
 }
 
 // Tela cheia pedindo a chave (por cima de tudo) — some quando a chave estiver certa.
@@ -276,6 +623,14 @@ async function syncFromRemote({ silent = false } = {}) {
     remote.itensVenda = unicos(remote.itensVenda, "id");
     remote.pagamentos = unicos(remote.pagamentos, "id");
     remote.estoque = unicos(remote.estoque, "produtoId");
+
+    // Banco novo ainda vazio, mas este aparelho tem dados (vindos da planilha):
+    // NÃO sobrescreve o aparelho com o vazio — oferece enviar os dados pro banco.
+    if (usandoSupabase() && sbBancoVazio(remote) && aparelhoTemDadosReais()) {
+      setSyncStatus("online");
+      oferecerMigracaoParaSupabase();
+      return;
+    }
     db = {
       ...remote,
       vendas: remote.vendas.map((v) => ({ ...v, dataPrevisaoPagamento: normalizarDataChave(v.dataPrevisaoPagamento) })),
@@ -290,6 +645,48 @@ async function syncFromRemote({ silent = false } = {}) {
     setSyncStatus("offline");
     if (!silent) showToast("Não foi possível conectar à planilha. Mostrando dados salvos neste aparelho.");
   }
+}
+
+// ---- migração planilha -> Supabase (só acontece uma vez, com o banco vazio) ----
+
+function sbBancoVazio(remote) {
+  return (
+    remote.vendas.length === 0 &&
+    remote.pagamentos.length === 0 &&
+    remote.clientes.every((c) => c.id === CLIENTE_AVULSO_ID)
+  );
+}
+
+function aparelhoTemDadosReais() {
+  return db.vendas.length > 0 || db.clientes.some((c) => c.id !== CLIENTE_AVULSO_ID);
+}
+
+let migracaoEmAndamento = false;
+function oferecerMigracaoParaSupabase() {
+  if (migracaoEmAndamento) return; // já perguntou (ou enviando) nesta abertura do app
+  migracaoEmAndamento = true;
+  const clientes = db.clientes.filter((c) => c.id !== CLIENTE_AVULSO_ID).length;
+  openConfirm({
+    title: "📦 Enviar dados para o novo banco?",
+    message:
+      `O banco novo está vazio, e este aparelho tem ${clientes} cliente(s), ${db.vendas.length} venda(s) e ${db.pagamentos.length} pagamento(s).\n` +
+      `Enviar tudo para o banco agora? A planilha antiga não é alterada.`,
+    confirmText: "Enviar agora",
+    cancelText: "Agora não",
+    onConfirm: async () => {
+      showToast("Enviando dados para o banco...");
+      try {
+        await enviarTudoParaPlanilha();
+        migracaoEmAndamento = false;
+        await syncFromRemote();
+        showToast("✅ Dados enviados para o novo banco!");
+      } catch (err) {
+        console.error("Erro na migração:", err);
+        migracaoEmAndamento = false;
+        showToast("⚠️ Não consegui enviar os dados: " + (err.message || "erro desconhecido"));
+      }
+    },
+  });
 }
 
 // Envia de uma vez todo o histórico deste aparelho para a planilha (usado na
@@ -519,7 +916,9 @@ function buildSeedDB() {
 function initDB() {
   db = loadDB();
   if (!db) {
-    db = buildSeedDB();
+    // Com o banco de verdade (Supabase) um aparelho novo começa vazio e puxa os
+    // dados reais; os clientes/vendas de exemplo só existem no modo de demonstração.
+    db = usandoSupabase() ? buildEmptyDB() : buildSeedDB();
     saveDB();
   } else {
     let precisaSalvar = false;
@@ -1960,7 +2359,6 @@ function renderListaClientes() {
               <div class="list-item__main">
                 <strong>${c.nome}</strong>
                 <span class="list-item__meta">📱 ${formatPhone(c.telefone)}</span>
-                ${htmlStatusCobranca(c)}
               </div>
               <div class="list-item__side">
                 <span class="badge">${status.emoji} ${saldo > 0 ? `Deve ${formatCurrency(saldo)}` : "Em dia"}</span>
@@ -2301,63 +2699,7 @@ function mostrarResumoPagamento({ cliente, saldoAntes, valorPago, novoSaldo, sob
   });
 }
 
-// Guarda quando a última cobrança foi enviada: na linha do cliente (vai pra
-// planilha, coluna "ultimaCobranca", e aparece em outros aparelhos) e também
-// só neste aparelho, pra não se perder se a planilha ainda não tiver a coluna.
-const COBRANCAS_KEY = "cowboySalgadosCobrancas_v1";
-
-function lerCobrancasLocais() {
-  try {
-    return JSON.parse(localStorage.getItem(COBRANCAS_KEY)) || {};
-  } catch (e) {
-    return {};
-  }
-}
-
-function getUltimaCobranca(cliente) {
-  const local = lerCobrancasLocais()[cliente.id] || "";
-  const remota = cliente.ultimaCobranca || "";
-  return local > remota ? local : remota || null;
-}
-
-// Linhas "mensagem enviada" / "WhatsApp aberto" mostradas embaixo do cliente
-// nas abas Clientes e Fiado.
-function htmlStatusCobranca(cliente) {
-  if (!cliente) return "";
-  let enviada = getUltimaCobranca(cliente);
-  // Se a pessoa acertou (qualquer valor) depois da mensagem, o aviso some.
-  if (enviada) {
-    const quando = new Date(enviada).getTime();
-    const pagouDepois = db.pagamentos.some(
-      (p) => p.clienteId === cliente.id && p.vendaId !== CREDITO_USADO_ID && p.vendaId !== CREDITO_ID && new Date(p.data).getTime() > quando
-    );
-    if (pagouDepois) enviada = null;
-  }
-  const pendente = lerCobrancaPendente()?.clienteId === cliente.id;
-  return (
-    (enviada ? `<span class="list-item__enviado">✅ Mensagem enviada em ${formatDateTime(enviada)}</span>` : "") +
-    (pendente ? `<span class="list-item__meta">⏳ WhatsApp aberto — confirme o envio ao voltar pro app</span>` : "")
-  );
-}
-
-// Atualiza a lista da aba aberta (Clientes ou Fiado) depois de uma cobrança.
-function atualizarListaCobranca() {
-  if (ui.viewAtual === "clientes") renderListaClientes();
-  else if (ui.viewAtual === "fiado") renderFiadoLista();
-}
-
-function registrarCobrancaEnviada(clienteId) {
-  const cliente = getCliente(clienteId);
-  if (!cliente) return;
-  const agora = new Date().toISOString();
-  const locais = lerCobrancasLocais();
-  locais[clienteId] = agora;
-  localStorage.setItem(COBRANCAS_KEY, JSON.stringify(locais));
-  cliente.ultimaCobranca = agora;
-  saveDB();
-  syncInBackground("upsert", { sheet: "Clientes", row: cliente });
-}
-
+// Abre o WhatsApp do cliente com a mensagem de cobrança pronta.
 function cobrarPeloWhatsApp(cliente) {
   const saldo = calcularSaldoCliente(cliente.id);
   const mensagem =
@@ -2368,66 +2710,8 @@ function cobrarPeloWhatsApp(cliente) {
   let digits = onlyDigits(cliente.telefone);
   if (digits.length <= 11) digits = `55${digits}`;
   const janela = window.open(`https://wa.me/${digits}?text=${encodeURIComponent(mensagem)}`, "_blank");
-  if (!janela) {
-    showToast("Não consegui abrir o WhatsApp. Libere pop-ups e tente de novo.");
-    return;
-  }
-  showToast(`📱 Abrindo o WhatsApp de ${cliente.nome}...`);
-  marcarCobrancaPendente(cliente.id);
+  if (!janela) showToast("Não consegui abrir o WhatsApp. Libere pop-ups e tente de novo.");
 }
-
-// O WhatsApp só abre a conversa com o texto pronto — quem aperta "enviar" é a
-// pessoa, e o app não tem como saber se ela apertou. Então guardamos que a
-// conversa foi aberta (no aparelho, pra sobreviver se o celular recarregar o
-// app enquanto o WhatsApp está aberto) e, quando a pessoa volta pro app,
-// perguntamos se enviou. Só com o "sim" aparece o aviso de "enviada".
-const COBRANCA_PENDENTE_KEY = "cowboySalgadosCobrancaPendente_v1";
-
-function lerCobrancaPendente() {
-  try {
-    const p = JSON.parse(localStorage.getItem(COBRANCA_PENDENTE_KEY));
-    // Esquece pedidos antigos (mais de 6h) pra não perguntar fora de hora.
-    return p && Date.now() - p.abertoEm < 6 * 60 * 60 * 1000 ? p : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-function marcarCobrancaPendente(clienteId) {
-  localStorage.setItem(COBRANCA_PENDENTE_KEY, JSON.stringify({ clienteId, abertoEm: Date.now() }));
-  atualizarListaCobranca();
-}
-
-function verificarCobrancaPendente() {
-  const pendente = lerCobrancaPendente();
-  if (!pendente) return;
-  // Ainda dentro do 1º segundo e meio = o próprio clique que abriu o WhatsApp.
-  if (document.visibilityState === "hidden" || Date.now() - pendente.abertoEm < 1500) return;
-  if (!document.getElementById("modal-confirm").classList.contains("hidden")) return;
-  const cliente = getCliente(pendente.clienteId);
-  localStorage.removeItem(COBRANCA_PENDENTE_KEY);
-  if (!cliente) return;
-
-  openConfirm({
-    title: "📱 Mensagem enviada?",
-    message: `Você enviou a mensagem para ${cliente.nome} no WhatsApp?`,
-    confirmText: "Sim, enviei",
-    cancelText: "Não enviei",
-    onConfirm: () => {
-      registrarCobrancaEnviada(cliente.id);
-      atualizarListaCobranca();
-      const hora = new Date().toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
-      openConfirm({
-        title: "✅ Mensagem enviada!",
-        message: `A mensagem para ${cliente.nome} já foi enviada (${hora}).`,
-        confirmText: "OK",
-        somenteConfirmar: true,
-      });
-    },
-  });
-  atualizarListaCobranca();
-}
-
 /* ==========================================================================
    15. RENDERIZAÇÃO — FIADO
    ========================================================================== */
@@ -2641,7 +2925,6 @@ function renderFiadoLista() {
               <div class="list-item__main">
                 <strong>${nome}</strong>
                 ${vencimento ? `<span class="list-item__meta">${vencimento}</span>` : ""}
-                ${htmlStatusCobranca(getCliente(clienteId))}
               </div>
               <div class="list-item__side">
                 <span class="list-item__value-label">${pendentes.length ? "Falta pagar" : "Total pago"}</span>
@@ -2961,14 +3244,15 @@ function renderConfiguracoes() {
         ).join("")}
       </div>
 
-      <h4 class="section-subtitle">📊 Planilha do Google</h4>
+      <h4 class="section-subtitle">${usandoSupabase() ? "🗄️ Banco de dados" : "📊 Planilha do Google"}</h4>
       <p class="field-hint">
-        Este app já vem conectado à planilha compartilhada do negócio — todo aparelho usa a
-        mesma automaticamente (sincroniza sozinho a cada minuto). Só use os botões abaixo
+        Este app já vem conectado ${usandoSupabase() ? "ao banco de dados do negócio" : "à planilha compartilhada do negócio"} — todo aparelho usa o
+        mesmo automaticamente (sincroniza sozinho a cada minuto). Só use os botões abaixo
         se precisar forçar uma atualização na hora.
       </p>
       <button class="btn btn--secondary btn--block" id="cfg-api-sync-btn">🔄 Sincronizar agora</button>
-      <button class="btn btn--secondary btn--block" id="cfg-api-enviar-btn">📤 Enviar dados deste aparelho para a planilha</button>
+      <button class="btn btn--secondary btn--block" id="cfg-api-enviar-btn">📤 Enviar dados deste aparelho para ${usandoSupabase() ? "o banco" : "a planilha"}</button>
+      ${usandoSupabase() ? `<button class="btn btn--secondary btn--block" id="cfg-api-conferir-btn">🔎 Conferir o que está no banco</button>` : ""}
 
       <h4 class="section-subtitle">Segurança dos dados</h4>
       <button class="btn btn--secondary btn--block" id="cfg-exportar-btn">📤 Exportar dados</button>
@@ -3001,8 +3285,8 @@ function renderConfiguracoes() {
 
   document.getElementById("cfg-api-enviar-btn").addEventListener("click", () => {
     openConfirm({
-      title: "📤 Enviar dados para a planilha",
-      message: "Isso substitui todo o conteúdo da planilha pelos dados que estão salvos neste aparelho. Use isso só se a planilha estiver desatualizada. Deseja continuar?",
+      title: usandoSupabase() ? "📤 Enviar dados para o banco" : "📤 Enviar dados para a planilha",
+      message: usandoSupabase() ? "Isso envia os dados salvos neste aparelho para o banco (atualiza o que já existe e adiciona o que falta, sem apagar nada). Deseja continuar?" : "Isso substitui todo o conteúdo da planilha pelos dados que estão salvos neste aparelho. Use isso só se a planilha estiver desatualizada. Deseja continuar?",
       confirmText: "Enviar",
       danger: true,
       onConfirm: async () => {
@@ -3010,20 +3294,45 @@ function renderConfiguracoes() {
         try {
           await enviarTudoParaPlanilha();
           setSyncStatus("online");
-          showToast("Dados enviados para a planilha!");
+          showToast(usandoSupabase() ? "Dados enviados para o banco!" : "Dados enviados para a planilha!");
         } catch (err) {
           console.error("Erro ao enviar dados:", err);
           setSyncStatus("offline");
-          showToast("Não foi possível enviar os dados para a planilha.");
+          showToast(usandoSupabase() ? "Não foi possível enviar os dados para o banco." : "Não foi possível enviar os dados para a planilha.");
         }
       },
     });
   });
 
+  // Compara, lado a lado, o que há no banco e o que há neste aparelho (serve pra
+  // conferir se a migração copiou tudo).
+  document.getElementById("cfg-api-conferir-btn")?.addEventListener("click", async () => {
+    showToast("Consultando o banco...");
+    try {
+      const r = await sbBuscarTudo();
+      const linha = (nome, banco, aparelho) => `${nome}: banco <strong>${banco}</strong> · aparelho <strong>${aparelho}</strong>`;
+      openConfirm({
+        title: "🔎 Banco x este aparelho",
+        message: [
+          linha("Clientes", r.clientes.filter((c) => c.id !== CLIENTE_AVULSO_ID).length, db.clientes.filter((c) => c.id !== CLIENTE_AVULSO_ID).length),
+          linha("Vendas", r.vendas.length, db.vendas.length),
+          linha("Itens de venda", r.itensVenda.length, db.itensVenda.length),
+          linha("Pagamentos", r.pagamentos.length, db.pagamentos.length),
+          "",
+          "Se o banco estiver com 0 e o aparelho com dados, use \"Enviar dados deste aparelho\".",
+        ].join("\n"),
+        confirmText: "OK",
+        somenteConfirmar: true,
+      });
+    } catch (err) {
+      showToast("Não consegui consultar o banco: " + (err.message || "erro"));
+    }
+  });
+
   document.getElementById("cfg-api-sync-btn").addEventListener("click", () => {
     openConfirm({
-      title: "🔄 Sincronizar a partir da planilha",
-      message: "Isso substitui os dados deste aparelho pelos dados atuais da planilha. Deseja continuar?",
+      title: usandoSupabase() ? "🔄 Sincronizar a partir do banco" : "🔄 Sincronizar a partir da planilha",
+      message: usandoSupabase() ? "Isso substitui os dados deste aparelho pelos dados atuais do banco. Deseja continuar?" : "Isso substitui os dados deste aparelho pelos dados atuais da planilha. Deseja continuar?",
       confirmText: "Sincronizar",
       danger: true,
       onConfirm: () => syncFromRemote(),
@@ -3975,10 +4284,6 @@ function initEventListeners() {
     renderConfiguracoes();
     openOverlay("overlay-configuracoes");
   });
-  // Voltou pro app (da aba/app do WhatsApp) — pergunta se a cobrança foi enviada.
-  document.addEventListener("visibilitychange", verificarCobrancaPendente);
-  window.addEventListener("focus", verificarCobrancaPendente);
-  window.addEventListener("pageshow", verificarCobrancaPendente);
   const syncBadge = document.getElementById("sync-badge");
   if (syncBadge) {
     syncBadge.addEventListener("click", () => {
@@ -3997,7 +4302,6 @@ function init() {
   initEventListeners();
   montarBarraTurno();
   switchView("inicio"); // renderiza imediatamente com os dados locais/em cache
-  verificarCobrancaPendente(); // o celular pode ter recarregado o app enquanto o WhatsApp estava aberto
   setSyncStatus(apiUrl ? "offline" : "offline");
   if (apiUrl) {
     syncFromRemote({ silent: true }); // depois, atualiza em segundo plano com a planilha
