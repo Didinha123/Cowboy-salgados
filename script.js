@@ -16,6 +16,7 @@ const PRODUTO_IDS = {
   SALGADO: "p-salgado",
   REFRIGERANTE: "p-refrigerante",
   TRUFA: "p-trufa",
+  BRIGADEIRO: "p-brigadeiro",
 };
 
 const FORMAS_PAGAMENTO_VISTA = [
@@ -648,6 +649,7 @@ async function syncFromRemote({ silent = false } = {}) {
       vendas: remote.vendas.map((v) => ({ ...v, dataPrevisaoPagamento: normalizarDataChave(v.dataPrevisaoPagamento) })),
       configuracoes: remote.configuracoes || { ...DEFAULT_CONFIGURACOES },
     };
+    garantirProdutosPadrao();
     saveDB();
     setSyncStatus("online");
     renderView(ui.viewAtual);
@@ -657,6 +659,41 @@ async function syncFromRemote({ silent = false } = {}) {
     setSyncStatus("offline");
     if (!silent) showToast("Não foi possível conectar à planilha. Mostrando dados salvos neste aparelho.");
   }
+}
+
+// Produtos adicionados depois que o banco/planilha já existia (ex.: Brigadeiro).
+// Se o que veio do banco ainda não tem o produto, ele é criado aqui e enviado
+// pra lá — só na primeira vez; depois ele já vem do banco como os outros.
+const PRODUTOS_NOVOS = [
+  {
+    produto: { id: PRODUTO_IDS.BRIGADEIRO, nome: "Brigadeiro", tipo: "brigadeiro", unidade: "un", icon: "🍬" },
+    estoqueMinimo: 10,
+    config: () => ({ precoBrigadeiro: DEFAULT_CONFIGURACOES.precoBrigadeiro }), // função: DEFAULT_CONFIGURACOES é declarado mais abaixo
+  },
+];
+
+function garantirProdutosPadrao() {
+  PRODUTOS_NOVOS.forEach(({ produto, estoqueMinimo, config }) => {
+    const acoes = [];
+    if (!db.produtos.some((p) => p.id === produto.id)) {
+      db.produtos.push({ ...produto });
+      acoes.push(["upsert", { sheet: "Produtos", row: produto }]);
+    }
+    if (!getEstoque(produto.id)) {
+      db.estoque.push({ produtoId: produto.id, quantidadeAtual: 0, estoqueMinimo });
+      // variação 0: cria a linha de estoque se faltar, sem mexer num estoque que já exista
+      acoes.push(["ajustarEstoque", { estoqueDelta: [{ produtoId: produto.id, delta: 0, estoqueMinimo }] }]);
+    }
+    const novasConfig = {};
+    Object.entries(config()).forEach(([chave, valor]) => {
+      if (db.configuracoes[chave] === undefined || db.configuracoes[chave] === null || db.configuracoes[chave] === "") {
+        db.configuracoes[chave] = valor;
+        novasConfig[chave] = valor;
+      }
+    });
+    if (Object.keys(novasConfig).length) acoes.push(["saveConfig", { config: novasConfig }]);
+    if (acoes.length) syncSequencial(acoes);
+  });
 }
 
 // ---- migração planilha -> Supabase (só acontece uma vez, com o banco vazio) ----
@@ -773,6 +810,7 @@ const DEFAULT_CONFIGURACOES = {
   precoRefrigerante: 4.5,
   precoTrufa: 7.5,
   precoKit4Trufas: 24.0,
+  precoBrigadeiro: 5.0,
   metaDiaria: 80,
   estoqueMinimoSalgado: 20,
 };
@@ -792,12 +830,14 @@ function buildSeedDB() {
     { id: PRODUTO_IDS.SALGADO, nome: "Salgado", tipo: "salgado", unidade: "un", icon: "🥟" },
     { id: PRODUTO_IDS.REFRIGERANTE, nome: "Refrigerante 200ml", tipo: "refrigerante", unidade: "un", icon: "🥤" },
     { id: PRODUTO_IDS.TRUFA, nome: "Trufa", tipo: "trufa", unidade: "un", icon: "🍫" },
+    { id: PRODUTO_IDS.BRIGADEIRO, nome: "Brigadeiro", tipo: "brigadeiro", unidade: "un", icon: "🍬" },
   ];
 
   const estoque = [
     { produtoId: PRODUTO_IDS.SALGADO, quantidadeAtual: 52, estoqueMinimo: 20 },
     { produtoId: PRODUTO_IDS.REFRIGERANTE, quantidadeAtual: 18, estoqueMinimo: 12 },
     { produtoId: PRODUTO_IDS.TRUFA, quantidadeAtual: 30, estoqueMinimo: 10 },
+    { produtoId: PRODUTO_IDS.BRIGADEIRO, quantidadeAtual: 24, estoqueMinimo: 10 },
   ];
 
   const clientes = [
@@ -1027,6 +1067,7 @@ function buildEmptyDB() {
       { id: PRODUTO_IDS.SALGADO, nome: "Salgado", tipo: "salgado", unidade: "un", icon: "🥟" },
       { id: PRODUTO_IDS.REFRIGERANTE, nome: "Refrigerante 200ml", tipo: "refrigerante", unidade: "un", icon: "🥤" },
       { id: PRODUTO_IDS.TRUFA, nome: "Trufa", tipo: "trufa", unidade: "un", icon: "🍫" },
+      { id: PRODUTO_IDS.BRIGADEIRO, nome: "Brigadeiro", tipo: "brigadeiro", unidade: "un", icon: "🍬" },
     ],
     vendas: [],
     itensVenda: [],
@@ -1035,6 +1076,7 @@ function buildEmptyDB() {
       { produtoId: PRODUTO_IDS.SALGADO, quantidadeAtual: 0, estoqueMinimo: 20 },
       { produtoId: PRODUTO_IDS.REFRIGERANTE, quantidadeAtual: 0, estoqueMinimo: 12 },
       { produtoId: PRODUTO_IDS.TRUFA, quantidadeAtual: 0, estoqueMinimo: 10 },
+      { produtoId: PRODUTO_IDS.BRIGADEIRO, quantidadeAtual: 0, estoqueMinimo: 10 },
     ],
     configuracoes: { ...DEFAULT_CONFIGURACOES },
   };
@@ -1168,6 +1210,7 @@ function calcularValorItem(produto, quantidade, config = db.configuracoes) {
     const avulsas = quantidade % 4;
     return kits * config.precoKit4Trufas + avulsas * config.precoTrufa;
   }
+  if (produto.tipo === "brigadeiro") return precoBrigadeiroDe(config) * quantidade;
   const preco = produto.tipo === "salgado" ? config.precoSalgado : config.precoRefrigerante;
   return preco * quantidade;
 }
@@ -1175,7 +1218,13 @@ function calcularValorItem(produto, quantidade, config = db.configuracoes) {
 function precoUnitario(produto, config = db.configuracoes) {
   if (produto.tipo === "salgado") return config.precoSalgado;
   if (produto.tipo === "refrigerante") return config.precoRefrigerante;
+  if (produto.tipo === "brigadeiro") return precoBrigadeiroDe(config);
   return config.precoTrufa;
+}
+
+// Se a configuração ainda não tem o preço do brigadeiro (produto novo), usa o padrão.
+function precoBrigadeiroDe(config) {
+  return config.precoBrigadeiro ?? DEFAULT_CONFIGURACOES.precoBrigadeiro;
 }
 
 function getProduto(id) {
@@ -1885,6 +1934,7 @@ function gerarRelatorio(filtro, customStart, customEnd, opcoes = {}) {
     salgados: somaPorTipo("salgado"),
     refrigerantes: somaPorTipo("refrigerante"),
     trufas: somaPorTipo("trufa"),
+    brigadeiros: somaPorTipo("brigadeiro"),
     faturamentoTotal,
     valorRecebidoVista,
     valorRecebidoFiado,
@@ -3184,10 +3234,11 @@ function renderRelatorio() {
         <div class="stat-box"><span>Vendas</span><strong>${relatorio.quantidadeVendas}</strong></div>
         <div class="stat-box"><span>Faturamento</span><strong>${formatCurrency(relatorio.faturamentoTotal)}</strong></div>
       </div>
-      <div class="stat-row">
+      <div class="stat-row stat-row--2">
         <div class="stat-box"><span>🥟 Salgados</span><strong>${relatorio.salgados}</strong></div>
         <div class="stat-box"><span>🥤 Refrigerantes</span><strong>${relatorio.refrigerantes}</strong></div>
         <div class="stat-box"><span>🍫 Trufas</span><strong>${relatorio.trufas}</strong></div>
+        <div class="stat-box"><span>🍬 Brigadeiros</span><strong>${relatorio.brigadeiros}</strong></div>
       </div>
 
       <h4 class="section-subtitle">Ciclos do dia (pelo horário do lançamento)</h4>
@@ -3290,6 +3341,7 @@ function renderConfiguracoes() {
       <div class="form-field"><label>Preço do refrigerante</label><input id="cfg-refrigerante" type="number" step="0.01" inputmode="decimal" value="${c.precoRefrigerante}" /></div>
       <div class="form-field"><label>Preço da trufa (unidade)</label><input id="cfg-trufa" type="number" step="0.01" inputmode="decimal" value="${c.precoTrufa}" /></div>
       <div class="form-field"><label>Preço do kit com 4 trufas</label><input id="cfg-kit4" type="number" step="0.01" inputmode="decimal" value="${c.precoKit4Trufas}" /></div>
+      <div class="form-field"><label>Preço do brigadeiro (unidade)</label><input id="cfg-brigadeiro" type="number" step="0.01" inputmode="decimal" value="${precoBrigadeiroDe(c)}" /></div>
       <div class="form-field"><label>Meta diária de salgados</label><input id="cfg-meta" type="number" inputmode="numeric" value="${c.metaDiaria}" /></div>
       <div class="form-field"><label>Estoque mínimo (Salgado)</label><input id="cfg-min-salgado" type="number" inputmode="numeric" value="${c.estoqueMinimoSalgado}" /></div>
       <button class="btn btn--primary btn--block" id="cfg-salvar-btn">Salvar configurações</button>
@@ -3336,6 +3388,7 @@ function renderConfiguracoes() {
       precoRefrigerante: parseFloat(document.getElementById("cfg-refrigerante").value) || 0,
       precoTrufa: parseFloat(document.getElementById("cfg-trufa").value) || 0,
       precoKit4Trufas: parseFloat(document.getElementById("cfg-kit4").value) || 0,
+      precoBrigadeiro: parseFloat(document.getElementById("cfg-brigadeiro").value) || 0,
       metaDiaria: Math.round(parseFloat(document.getElementById("cfg-meta").value)) || 1,
       estoqueMinimoSalgado: Math.round(parseFloat(document.getElementById("cfg-min-salgado").value)) || 0,
     });
