@@ -1224,8 +1224,7 @@ select {
 
 /* ---- Paletas de cores (escolha em Configurações > Cores do app) ---- */
 
-/* Azul-petróleo (padrão) */
-:root,
+/* Azul-petróleo */
 html[data-tema="petroleo"] {
   --bg: #f1f6f8;
   --bg-outer: #e1eaee;
@@ -1293,7 +1292,8 @@ html[data-tema="esmeralda"] {
   --grad-3: #1da57c;
 }
 
-/* Terracota (o visual anterior) */
+/* Terracota (padrão: o visual original) */
+:root,
 html[data-tema="terracota"] {
   --bg: #f7f3ec;
   --bg-outer: #ece4d8;
@@ -1330,7 +1330,6 @@ html[data-tema="terracota"] {
     --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.5), 0 18px 44px rgba(0, 0, 0, 0.55);
   }
 
-  :root,
   html[data-tema="petroleo"] {
     --bg: #0d1417;
     --bg-outer: #070b0d;
@@ -1399,6 +1398,7 @@ html[data-tema="terracota"] {
     --grad-3: #16906b;
   }
 
+  :root,
   html[data-tema="terracota"] {
     --bg: #14100d;
     --bg-outer: #0b0907;
