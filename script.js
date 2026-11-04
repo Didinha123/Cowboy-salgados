@@ -316,6 +316,11 @@ async function sbBuscarTudo() {
   const [clientes, produtos, vendas, itensVenda, pagamentos, estoque, cfg] = await Promise.all(
     ["Clientes", "Produtos", "Vendas", "ItensVenda", "Pagamentos", "Estoque", "Configuracoes"].map(sbBuscarTabela)
   );
+  // Mesma ordem da planilha: Cliente Avulso primeiro e depois por data de cadastro.
+  clientes.sort(
+    (a, b) =>
+      (b.id === CLIENTE_AVULSO_ID) - (a.id === CLIENTE_AVULSO_ID) || String(a.createdAt || "").localeCompare(String(b.createdAt || ""))
+  );
   const configuracoes = {};
   cfg.forEach((r) => {
     const n = Number(r.valor);
@@ -650,6 +655,8 @@ async function syncFromRemote({ silent = false } = {}) {
       configuracoes: remote.configuracoes || { ...DEFAULT_CONFIGURACOES },
     };
     garantirProdutosPadrao();
+    garantirClienteAvulso();
+    ordenarProdutosEEstoque();
     saveDB();
     setSyncStatus("online");
     renderView(ui.viewAtual);
@@ -668,7 +675,12 @@ const PRODUTOS_NOVOS = [
   {
     produto: { id: PRODUTO_IDS.BRIGADEIRO, nome: "Brigadeiro", tipo: "brigadeiro", unidade: "un", icon: "🍬" },
     estoqueMinimo: 10,
-    config: () => ({ precoBrigadeiro: DEFAULT_CONFIGURACOES.precoBrigadeiro }), // função: DEFAULT_CONFIGURACOES é declarado mais abaixo
+    // função: DEFAULT_CONFIGURACOES é declarado mais abaixo
+    config: () => ({
+      precoBrigadeiro1: DEFAULT_CONFIGURACOES.precoBrigadeiro1,
+      precoBrigadeiro2: DEFAULT_CONFIGURACOES.precoBrigadeiro2,
+      precoBrigadeiro3: DEFAULT_CONFIGURACOES.precoBrigadeiro3,
+    }),
   },
 ];
 
@@ -694,6 +706,23 @@ function garantirProdutosPadrao() {
     if (Object.keys(novasConfig).length) acoes.push(["saveConfig", { config: novasConfig }]);
     if (acoes.length) syncSequencial(acoes);
   });
+}
+
+// O Cliente Avulso (balcão) precisa sempre existir. Se por qualquer motivo ele não
+// veio do banco, recria e envia de volta.
+function garantirClienteAvulso() {
+  if (db.clientes.some((c) => c.id === CLIENTE_AVULSO_ID)) return;
+  const avulso = {
+    id: CLIENTE_AVULSO_ID,
+    nome: "Cliente Avulso (Balcão)",
+    telefone: "",
+    observacao: "Venda rápida sem cadastro completo.",
+    fixo: true,
+    credito: 0,
+    createdAt: new Date().toISOString(),
+  };
+  db.clientes.unshift(avulso);
+  syncSequencial([["upsert", { sheet: "Clientes", row: avulso }]]);
 }
 
 // ---- migração planilha -> Supabase (só acontece uma vez, com o banco vazio) ----
@@ -810,7 +839,9 @@ const DEFAULT_CONFIGURACOES = {
   precoRefrigerante: 4.5,
   precoTrufa: 7.5,
   precoKit4Trufas: 24.0,
-  precoBrigadeiro: 5.0,
+  precoBrigadeiro1: 12.0, // 1 brigadeiro
+  precoBrigadeiro2: 22.0, // 2 brigadeiros
+  precoBrigadeiro3: 30.0, // 3 brigadeiros
   metaDiaria: 80,
   estoqueMinimoSalgado: 20,
 };
@@ -1037,6 +1068,7 @@ function initDB() {
         precisaSalvar = true;
       }
     });
+    ordenarProdutosEEstoque();
     if (precisaSalvar) saveDB();
   }
 }
@@ -1210,7 +1242,7 @@ function calcularValorItem(produto, quantidade, config = db.configuracoes) {
     const avulsas = quantidade % 4;
     return kits * config.precoKit4Trufas + avulsas * config.precoTrufa;
   }
-  if (produto.tipo === "brigadeiro") return precoBrigadeiroDe(config) * quantidade;
+  if (produto.tipo === "brigadeiro") return calcularValorBrigadeiro(quantidade, config);
   const preco = produto.tipo === "salgado" ? config.precoSalgado : config.precoRefrigerante;
   return preco * quantidade;
 }
@@ -1218,17 +1250,43 @@ function calcularValorItem(produto, quantidade, config = db.configuracoes) {
 function precoUnitario(produto, config = db.configuracoes) {
   if (produto.tipo === "salgado") return config.precoSalgado;
   if (produto.tipo === "refrigerante") return config.precoRefrigerante;
-  if (produto.tipo === "brigadeiro") return precoBrigadeiroDe(config);
+  if (produto.tipo === "brigadeiro") return precosBrigadeiro(config).p1;
   return config.precoTrufa;
 }
 
-// Se a configuração ainda não tem o preço do brigadeiro (produto novo), usa o padrão.
-function precoBrigadeiroDe(config) {
-  return config.precoBrigadeiro ?? DEFAULT_CONFIGURACOES.precoBrigadeiro;
+// Brigadeiro tem preço por pacote, como as trufas: 1 por R$ 12, 2 por R$ 22 e 3 por R$ 30.
+// Acima de 3, vale a combinação mais barata (pacotes de 3 + o que sobrar).
+// Se a configuração ainda não tem os preços (produto novo), usa os padrões.
+function precosBrigadeiro(config) {
+  return {
+    p1: config.precoBrigadeiro1 ?? DEFAULT_CONFIGURACOES.precoBrigadeiro1,
+    p2: config.precoBrigadeiro2 ?? DEFAULT_CONFIGURACOES.precoBrigadeiro2,
+    p3: config.precoBrigadeiro3 ?? DEFAULT_CONFIGURACOES.precoBrigadeiro3,
+  };
+}
+
+function calcularValorBrigadeiro(quantidade, config) {
+  const { p1, p2, p3 } = precosBrigadeiro(config);
+  const resto = quantidade % 3;
+  return Math.floor(quantidade / 3) * p3 + (resto === 2 ? p2 : resto === 1 ? p1 : 0);
 }
 
 function getProduto(id) {
   return db.produtos.find((p) => p.id === id);
+}
+
+// Ordem fixa dos produtos na venda e no estoque: salgado, refrigerante, trufa, brigadeiro.
+// (O banco devolve em ordem alfabética de id; aqui voltamos para a ordem que você usa.)
+const ORDEM_PRODUTOS = [PRODUTO_IDS.SALGADO, PRODUTO_IDS.REFRIGERANTE, PRODUTO_IDS.TRUFA, PRODUTO_IDS.BRIGADEIRO];
+
+function posicaoProduto(id) {
+  const i = ORDEM_PRODUTOS.indexOf(id);
+  return i < 0 ? ORDEM_PRODUTOS.length : i;
+}
+
+function ordenarProdutosEEstoque() {
+  db.produtos.sort((a, b) => posicaoProduto(a.id) - posicaoProduto(b.id));
+  db.estoque.sort((a, b) => posicaoProduto(a.produtoId) - posicaoProduto(b.produtoId));
 }
 
 function getCliente(id) {
@@ -3341,7 +3399,9 @@ function renderConfiguracoes() {
       <div class="form-field"><label>Preço do refrigerante</label><input id="cfg-refrigerante" type="number" step="0.01" inputmode="decimal" value="${c.precoRefrigerante}" /></div>
       <div class="form-field"><label>Preço da trufa (unidade)</label><input id="cfg-trufa" type="number" step="0.01" inputmode="decimal" value="${c.precoTrufa}" /></div>
       <div class="form-field"><label>Preço do kit com 4 trufas</label><input id="cfg-kit4" type="number" step="0.01" inputmode="decimal" value="${c.precoKit4Trufas}" /></div>
-      <div class="form-field"><label>Preço do brigadeiro (unidade)</label><input id="cfg-brigadeiro" type="number" step="0.01" inputmode="decimal" value="${precoBrigadeiroDe(c)}" /></div>
+      <div class="form-field"><label>Brigadeiro — 1 unidade</label><input id="cfg-brigadeiro1" type="number" step="0.01" inputmode="decimal" value="${precosBrigadeiro(c).p1}" /></div>
+      <div class="form-field"><label>Brigadeiro — 2 unidades</label><input id="cfg-brigadeiro2" type="number" step="0.01" inputmode="decimal" value="${precosBrigadeiro(c).p2}" /></div>
+      <div class="form-field"><label>Brigadeiro — 3 unidades</label><input id="cfg-brigadeiro3" type="number" step="0.01" inputmode="decimal" value="${precosBrigadeiro(c).p3}" /></div>
       <div class="form-field"><label>Meta diária de salgados</label><input id="cfg-meta" type="number" inputmode="numeric" value="${c.metaDiaria}" /></div>
       <div class="form-field"><label>Estoque mínimo (Salgado)</label><input id="cfg-min-salgado" type="number" inputmode="numeric" value="${c.estoqueMinimoSalgado}" /></div>
       <button class="btn btn--primary btn--block" id="cfg-salvar-btn">Salvar configurações</button>
@@ -3388,7 +3448,9 @@ function renderConfiguracoes() {
       precoRefrigerante: parseFloat(document.getElementById("cfg-refrigerante").value) || 0,
       precoTrufa: parseFloat(document.getElementById("cfg-trufa").value) || 0,
       precoKit4Trufas: parseFloat(document.getElementById("cfg-kit4").value) || 0,
-      precoBrigadeiro: parseFloat(document.getElementById("cfg-brigadeiro").value) || 0,
+      precoBrigadeiro1: parseFloat(document.getElementById("cfg-brigadeiro1").value) || 0,
+      precoBrigadeiro2: parseFloat(document.getElementById("cfg-brigadeiro2").value) || 0,
+      precoBrigadeiro3: parseFloat(document.getElementById("cfg-brigadeiro3").value) || 0,
       metaDiaria: Math.round(parseFloat(document.getElementById("cfg-meta").value)) || 1,
       estoqueMinimoSalgado: Math.round(parseFloat(document.getElementById("cfg-min-salgado").value)) || 0,
     });
@@ -3616,7 +3678,11 @@ function renderPassoCliente() {
 }
 
 function renderListaClientesBusca() {
-  const lista = filtrarClientes(ui.novaVenda.buscaCliente);
+  // O Cliente Avulso fica sempre no topo (o banco devolve os clientes em ordem de id,
+  // e ele ia parar no fim da lista).
+  const lista = [...filtrarClientes(ui.novaVenda.buscaCliente)].sort(
+    (a, b) => (b.id === CLIENTE_AVULSO_ID) - (a.id === CLIENTE_AVULSO_ID)
+  );
   const ul = document.getElementById("venda-lista-clientes");
 
   ul.innerHTML = lista
@@ -3653,12 +3719,12 @@ function renderPassoProdutos() {
         ${db.produtos
           .map((p) => {
             const qtd = ui.novaVenda.itens[p.id] || 0;
-            const promo = p.tipo === "trufa" && qtd >= 4;
+            const promo = (p.tipo === "trufa" && qtd >= 4) || (p.tipo === "brigadeiro" && qtd >= 2);
             return `
             <div class="product-card">
               <div class="product-card__info">
                 <span class="product-card__name">${p.icon} ${p.nome}</span>
-                <span class="product-card__price">${formatCurrency(precoUnitario(p))} / un ${p.tipo === "trufa" ? `· kit 4 = ${formatCurrency(db.configuracoes.precoKit4Trufas)}` : ""}</span>
+                <span class="product-card__price">${formatCurrency(precoUnitario(p))} / un ${p.tipo === "trufa" ? `· kit 4 = ${formatCurrency(db.configuracoes.precoKit4Trufas)}` : ""}${p.tipo === "brigadeiro" ? `· 2 = ${formatCurrency(precosBrigadeiro(db.configuracoes).p2)} · 3 = ${formatCurrency(precosBrigadeiro(db.configuracoes).p3)}` : ""}</span>
               </div>
               <div class="stepper">
                 <button class="stepper__btn" data-action="menos" data-produto="${p.id}">−</button>
