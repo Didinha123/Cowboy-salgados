@@ -1292,12 +1292,12 @@ function getCliente(id) {
   return db.clientes.find((c) => c.id === id);
 }
 
-// Venda avulsa = o Cliente Avulso (balcão) ou qualquer cliente cadastrado com "avulso" no
-// nome. Nessas vendas o app pede a descrição (referência/nome de quem comprou) e as lista
+// Venda avulsa = o Cliente Avulso (balcão) ou qualquer cliente cadastrado com "avulso"/"avulsa"
+// no nome. Nessas vendas o app pede a descrição (referência/nome de quem comprou) e as lista
 // separadas na aba Venda.
 function ehClienteAvulso(cliente) {
   if (!cliente) return false;
-  return cliente.id === CLIENTE_AVULSO_ID || /avulso/i.test(String(cliente.nome || ""));
+  return cliente.id === CLIENTE_AVULSO_ID || /avuls/i.test(String(cliente.nome || "")); // pega "avulso" e "avulsa"
 }
 
 function getEstoque(produtoId) {
@@ -3721,6 +3721,14 @@ function renderPassoProdutos() {
     ${stepHeader("Adicionar produtos", true)}
     <div class="overlay__body">
       <p class="selected-cliente">Cliente: <strong>${cliente.nome}</strong></p>
+      ${
+        ehClienteAvulso(cliente)
+          ? `<div class="form-field">
+              <label for="venda-descricao">📝 Descrição / referência (obrigatório)</label>
+              <input type="text" id="venda-descricao" maxlength="80" placeholder="Ex.: moça da loja ao lado, evento da escola" value="${(ui.novaVenda.descricao || "").replace(/"/g, "&quot;")}" />
+            </div>`
+          : ""
+      }
 
       <div class="product-list">
         ${db.produtos
@@ -3771,9 +3779,18 @@ function renderPassoProdutos() {
       renderPassoProdutos();
     });
   });
+  document.getElementById("venda-descricao")?.addEventListener("input", (e) => {
+    ui.novaVenda.descricao = e.target.value;
+  });
   const avancarBtn = document.getElementById("venda-avancar-pagamento-btn");
   if (avancarBtn) {
     avancarBtn.addEventListener("click", () => {
+      // Venda avulsa: a descrição/referência é obrigatória antes de seguir pro pagamento.
+      if (ehClienteAvulso(getCliente(ui.novaVenda.clienteId)) && !(ui.novaVenda.descricao || "").trim()) {
+        showToast("Escreva a descrição / referência da venda avulsa.");
+        document.getElementById("venda-descricao")?.focus();
+        return;
+      }
       ui.novaVenda.step = 3;
       renderNovaVenda();
     });
