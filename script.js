@@ -679,7 +679,7 @@ const PRODUTOS_NOVOS = [
     config: () => ({
       precoBrigadeiro1: DEFAULT_CONFIGURACOES.precoBrigadeiro1,
       precoBrigadeiro2: DEFAULT_CONFIGURACOES.precoBrigadeiro2,
-      precoBrigadeiro3: DEFAULT_CONFIGURACOES.precoBrigadeiro3,
+      precoBrigadeiroCada3: DEFAULT_CONFIGURACOES.precoBrigadeiroCada3,
     }),
   },
 ];
@@ -841,7 +841,7 @@ const DEFAULT_CONFIGURACOES = {
   precoKit4Trufas: 24.0,
   precoBrigadeiro1: 12.0, // 1 brigadeiro
   precoBrigadeiro2: 22.0, // 2 brigadeiros
-  precoBrigadeiro3: 30.0, // 3 brigadeiros
+  precoBrigadeiroCada3: 10.0, // a partir de 3 brigadeiros, cada um
   metaDiaria: 80,
   estoqueMinimoSalgado: 20,
 };
@@ -1254,21 +1254,20 @@ function precoUnitario(produto, config = db.configuracoes) {
   return config.precoTrufa;
 }
 
-// Brigadeiro tem preço por pacote, como as trufas: 1 por R$ 12, 2 por R$ 22 e 3 por R$ 30.
-// Acima de 3, vale a combinação mais barata (pacotes de 3 + o que sobrar).
+// Brigadeiro: 1 por R$ 12, 2 por R$ 22 e, a partir de 3, R$ 10 cada (3 = 30, 4 = 40...).
 // Se a configuração ainda não tem os preços (produto novo), usa os padrões.
 function precosBrigadeiro(config) {
   return {
     p1: config.precoBrigadeiro1 ?? DEFAULT_CONFIGURACOES.precoBrigadeiro1,
     p2: config.precoBrigadeiro2 ?? DEFAULT_CONFIGURACOES.precoBrigadeiro2,
-    p3: config.precoBrigadeiro3 ?? DEFAULT_CONFIGURACOES.precoBrigadeiro3,
+    cada3: config.precoBrigadeiroCada3 ?? DEFAULT_CONFIGURACOES.precoBrigadeiroCada3,
   };
 }
 
 function calcularValorBrigadeiro(quantidade, config) {
-  const { p1, p2, p3 } = precosBrigadeiro(config);
-  const resto = quantidade % 3;
-  return Math.floor(quantidade / 3) * p3 + (resto === 2 ? p2 : resto === 1 ? p1 : 0);
+  const { p1, p2, cada3 } = precosBrigadeiro(config);
+  if (quantidade >= 3) return quantidade * cada3;
+  return quantidade === 2 ? p2 : quantidade === 1 ? p1 : 0;
 }
 
 function getProduto(id) {
@@ -1291,6 +1290,14 @@ function ordenarProdutosEEstoque() {
 
 function getCliente(id) {
   return db.clientes.find((c) => c.id === id);
+}
+
+// Venda avulsa = o Cliente Avulso (balcão) ou qualquer cliente cadastrado com "avulso" no
+// nome. Nessas vendas o app pede a descrição (referência/nome de quem comprou) e as lista
+// separadas na aba Venda.
+function ehClienteAvulso(cliente) {
+  if (!cliente) return false;
+  return cliente.id === CLIENTE_AVULSO_ID || /avulso/i.test(String(cliente.nome || ""));
 }
 
 function getEstoque(produtoId) {
@@ -2319,7 +2326,7 @@ function renderVendaView() {
   // em vez de somadas num "cliente" só — mas entram no total do dia e nos ciclos.
   const avulsas = [];
   vendasHoje.forEach((v) => {
-    if (v.clienteId === CLIENTE_AVULSO_ID) {
+    if (ehClienteAvulso(getCliente(v.clienteId))) {
       avulsas.push(v);
       totalDia += v.valorTotal;
       ciclos[getCiclo(v.data)] += v.valorTotal;
@@ -3401,7 +3408,7 @@ function renderConfiguracoes() {
       <div class="form-field"><label>Preço do kit com 4 trufas</label><input id="cfg-kit4" type="number" step="0.01" inputmode="decimal" value="${c.precoKit4Trufas}" /></div>
       <div class="form-field"><label>Brigadeiro — 1 unidade</label><input id="cfg-brigadeiro1" type="number" step="0.01" inputmode="decimal" value="${precosBrigadeiro(c).p1}" /></div>
       <div class="form-field"><label>Brigadeiro — 2 unidades</label><input id="cfg-brigadeiro2" type="number" step="0.01" inputmode="decimal" value="${precosBrigadeiro(c).p2}" /></div>
-      <div class="form-field"><label>Brigadeiro — 3 unidades</label><input id="cfg-brigadeiro3" type="number" step="0.01" inputmode="decimal" value="${precosBrigadeiro(c).p3}" /></div>
+      <div class="form-field"><label>Brigadeiro — cada, a partir de 3 unidades</label><input id="cfg-brigadeiro3" type="number" step="0.01" inputmode="decimal" value="${precosBrigadeiro(c).cada3}" /></div>
       <div class="form-field"><label>Meta diária de salgados</label><input id="cfg-meta" type="number" inputmode="numeric" value="${c.metaDiaria}" /></div>
       <div class="form-field"><label>Estoque mínimo (Salgado)</label><input id="cfg-min-salgado" type="number" inputmode="numeric" value="${c.estoqueMinimoSalgado}" /></div>
       <button class="btn btn--primary btn--block" id="cfg-salvar-btn">Salvar configurações</button>
@@ -3450,7 +3457,7 @@ function renderConfiguracoes() {
       precoKit4Trufas: parseFloat(document.getElementById("cfg-kit4").value) || 0,
       precoBrigadeiro1: parseFloat(document.getElementById("cfg-brigadeiro1").value) || 0,
       precoBrigadeiro2: parseFloat(document.getElementById("cfg-brigadeiro2").value) || 0,
-      precoBrigadeiro3: parseFloat(document.getElementById("cfg-brigadeiro3").value) || 0,
+      precoBrigadeiroCada3: parseFloat(document.getElementById("cfg-brigadeiro3").value) || 0,
       metaDiaria: Math.round(parseFloat(document.getElementById("cfg-meta").value)) || 1,
       estoqueMinimoSalgado: Math.round(parseFloat(document.getElementById("cfg-min-salgado").value)) || 0,
     });
@@ -3724,7 +3731,7 @@ function renderPassoProdutos() {
             <div class="product-card">
               <div class="product-card__info">
                 <span class="product-card__name">${p.icon} ${p.nome}</span>
-                <span class="product-card__price">${formatCurrency(precoUnitario(p))} / un ${p.tipo === "trufa" ? `· kit 4 = ${formatCurrency(db.configuracoes.precoKit4Trufas)}` : ""}${p.tipo === "brigadeiro" ? `· 2 = ${formatCurrency(precosBrigadeiro(db.configuracoes).p2)} · 3 = ${formatCurrency(precosBrigadeiro(db.configuracoes).p3)}` : ""}</span>
+                <span class="product-card__price">${formatCurrency(precoUnitario(p))} / un ${p.tipo === "trufa" ? `· kit 4 = ${formatCurrency(db.configuracoes.precoKit4Trufas)}` : ""}${p.tipo === "brigadeiro" ? `· 2 = ${formatCurrency(precosBrigadeiro(db.configuracoes).p2)} · 3 ou mais = ${formatCurrency(precosBrigadeiro(db.configuracoes).cada3)} cada` : ""}</span>
               </div>
               <div class="stepper">
                 <button class="stepper__btn" data-action="menos" data-produto="${p.id}">−</button>
@@ -3811,7 +3818,7 @@ function renderPassoPagamento() {
     <div class="overlay__body">
       <p class="selected-cliente">Cliente: <strong>${cliente.nome}</strong></p>
       ${
-        isAvulso
+        ehClienteAvulso(cliente)
           ? `<div class="form-field">
               <label for="venda-descricao">📝 Descrição da venda (obrigatório)</label>
               <input type="text" id="venda-descricao" maxlength="80" placeholder="Ex.: moça da loja ao lado, evento da escola" value="${(ui.novaVenda.descricao || "").replace(/"/g, "&quot;")}" />
@@ -3998,7 +4005,7 @@ function confirmarNovaVenda() {
 
   // Cliente Avulso não tem cadastro: a descrição é o que identifica a venda depois.
   const descricao = (ui.novaVenda.descricao || "").trim();
-  if (ui.novaVenda.clienteId === CLIENTE_AVULSO_ID && !descricao) {
+  if (ehClienteAvulso(getCliente(ui.novaVenda.clienteId)) && !descricao) {
     showToast("Escreva a descrição da venda avulsa.");
     document.getElementById("venda-descricao")?.focus();
     return;
