@@ -677,7 +677,7 @@ const PRODUTOS_NOVOS = [
     estoqueMinimo: 10,
     // função: DEFAULT_CONFIGURACOES é declarado mais abaixo
     config: () => ({
-      precoBrigadeiro1: DEFAULT_CONFIGURACOES.precoBrigadeiro1,
+      precoBrigadeiroUn: DEFAULT_CONFIGURACOES.precoBrigadeiroUn,
       precoBrigadeiro2: DEFAULT_CONFIGURACOES.precoBrigadeiro2,
       precoBrigadeiroCada3: DEFAULT_CONFIGURACOES.precoBrigadeiroCada3,
     }),
@@ -839,7 +839,7 @@ const DEFAULT_CONFIGURACOES = {
   precoRefrigerante: 4.5,
   precoTrufa: 7.5,
   precoKit4Trufas: 24.0,
-  precoBrigadeiro1: 12.0, // 1 brigadeiro
+  precoBrigadeiroUn: 11.0, // 1 brigadeiro
   precoBrigadeiro2: 22.0, // 2 brigadeiros
   precoBrigadeiroCada3: 10.0, // a partir de 3 brigadeiros, cada um
   metaDiaria: 80,
@@ -1254,11 +1254,11 @@ function precoUnitario(produto, config = db.configuracoes) {
   return config.precoTrufa;
 }
 
-// Brigadeiro: 1 por R$ 12, 2 por R$ 22 e, a partir de 3, R$ 10 cada (3 = 30, 4 = 40...).
+// Brigadeiro: 1 por R$ 11, 2 por R$ 22 e, a partir de 3, R$ 10 cada (3 = 30, 4 = 40...).
 // Se a configuração ainda não tem os preços (produto novo), usa os padrões.
 function precosBrigadeiro(config) {
   return {
-    p1: config.precoBrigadeiro1 ?? DEFAULT_CONFIGURACOES.precoBrigadeiro1,
+    p1: config.precoBrigadeiroUn ?? DEFAULT_CONFIGURACOES.precoBrigadeiroUn,
     p2: config.precoBrigadeiro2 ?? DEFAULT_CONFIGURACOES.precoBrigadeiro2,
     cada3: config.precoBrigadeiroCada3 ?? DEFAULT_CONFIGURACOES.precoBrigadeiroCada3,
   };
@@ -1277,6 +1277,14 @@ function getProduto(id) {
 // Ordem fixa dos produtos na venda e no estoque: salgado, refrigerante, trufa, brigadeiro.
 // (O banco devolve em ordem alfabética de id; aqui voltamos para a ordem que você usa.)
 const ORDEM_PRODUTOS = [PRODUTO_IDS.SALGADO, PRODUTO_IDS.REFRIGERANTE, PRODUTO_IDS.TRUFA, PRODUTO_IDS.BRIGADEIRO];
+
+// Produtos que não são mais vendidos: somem da venda, do estoque e dos alertas, mas continuam
+// no banco para o histórico (vendas antigas de trufa seguem aparecendo nos relatórios).
+const PRODUTOS_ESCONDIDOS = [PRODUTO_IDS.TRUFA];
+
+function produtoVisivel(id) {
+  return !PRODUTOS_ESCONDIDOS.includes(id);
+}
 
 function posicaoProduto(id) {
   const i = ORDEM_PRODUTOS.indexOf(id);
@@ -1400,7 +1408,7 @@ function getQuantidadeSalgadosNaData(referenceDate = new Date()) {
 
 function getAlertasEstoque() {
   return db.estoque
-    .filter((e) => e.quantidadeAtual < e.estoqueMinimo)
+    .filter((e) => produtoVisivel(e.produtoId) && e.quantidadeAtual < e.estoqueMinimo)
     .map((e) => ({ ...e, produto: getProduto(e.produtoId) }));
 }
 
@@ -3163,6 +3171,7 @@ function renderEstoque() {
     <h2 class="view-title">📦 Estoque</h2>
     <ul class="list">
       ${db.estoque
+        .filter((e) => produtoVisivel(e.produtoId))
         .map((e) => {
           const produto = getProduto(e.produtoId);
           const baixo = e.quantidadeAtual < e.estoqueMinimo;
@@ -3299,11 +3308,11 @@ function renderRelatorio() {
         <div class="stat-box"><span>Vendas</span><strong>${relatorio.quantidadeVendas}</strong></div>
         <div class="stat-box"><span>Faturamento</span><strong>${formatCurrency(relatorio.faturamentoTotal)}</strong></div>
       </div>
-      <div class="stat-row stat-row--2">
+      <div class="stat-row ${relatorio.trufas > 0 ? "stat-row--2" : ""}">
         <div class="stat-box"><span>🥟 Salgados</span><strong>${relatorio.salgados}</strong></div>
         <div class="stat-box"><span>🥤 Refrigerantes</span><strong>${relatorio.refrigerantes}</strong></div>
-        <div class="stat-box"><span>🍫 Trufas</span><strong>${relatorio.trufas}</strong></div>
         <div class="stat-box"><span>🍬 Brigadeiros</span><strong>${relatorio.brigadeiros}</strong></div>
+        ${relatorio.trufas > 0 ? `<div class="stat-box"><span>🍫 Trufas (vendas antigas)</span><strong>${relatorio.trufas}</strong></div>` : ""}
       </div>
 
       <h4 class="section-subtitle">Ciclos do dia (pelo horário do lançamento)</h4>
@@ -3404,8 +3413,6 @@ function renderConfiguracoes() {
       <div class="form-field"><label>Nome do negócio</label><input id="cfg-nome" type="text" value="${c.nomeNegocio}" /></div>
       <div class="form-field"><label>Preço do salgado</label><input id="cfg-salgado" type="number" step="0.01" inputmode="decimal" value="${c.precoSalgado}" /></div>
       <div class="form-field"><label>Preço do refrigerante</label><input id="cfg-refrigerante" type="number" step="0.01" inputmode="decimal" value="${c.precoRefrigerante}" /></div>
-      <div class="form-field"><label>Preço da trufa (unidade)</label><input id="cfg-trufa" type="number" step="0.01" inputmode="decimal" value="${c.precoTrufa}" /></div>
-      <div class="form-field"><label>Preço do kit com 4 trufas</label><input id="cfg-kit4" type="number" step="0.01" inputmode="decimal" value="${c.precoKit4Trufas}" /></div>
       <div class="form-field"><label>Brigadeiro — 1 unidade</label><input id="cfg-brigadeiro1" type="number" step="0.01" inputmode="decimal" value="${precosBrigadeiro(c).p1}" /></div>
       <div class="form-field"><label>Brigadeiro — 2 unidades</label><input id="cfg-brigadeiro2" type="number" step="0.01" inputmode="decimal" value="${precosBrigadeiro(c).p2}" /></div>
       <div class="form-field"><label>Brigadeiro — cada, a partir de 3 unidades</label><input id="cfg-brigadeiro3" type="number" step="0.01" inputmode="decimal" value="${precosBrigadeiro(c).cada3}" /></div>
@@ -3453,9 +3460,7 @@ function renderConfiguracoes() {
       nomeNegocio: document.getElementById("cfg-nome").value.trim() || "Cowboy Salgados",
       precoSalgado: parseFloat(document.getElementById("cfg-salgado").value) || 0,
       precoRefrigerante: parseFloat(document.getElementById("cfg-refrigerante").value) || 0,
-      precoTrufa: parseFloat(document.getElementById("cfg-trufa").value) || 0,
-      precoKit4Trufas: parseFloat(document.getElementById("cfg-kit4").value) || 0,
-      precoBrigadeiro1: parseFloat(document.getElementById("cfg-brigadeiro1").value) || 0,
+      precoBrigadeiroUn: parseFloat(document.getElementById("cfg-brigadeiro1").value) || 0,
       precoBrigadeiro2: parseFloat(document.getElementById("cfg-brigadeiro2").value) || 0,
       precoBrigadeiroCada3: parseFloat(document.getElementById("cfg-brigadeiro3").value) || 0,
       metaDiaria: Math.round(parseFloat(document.getElementById("cfg-meta").value)) || 1,
@@ -3732,6 +3737,7 @@ function renderPassoProdutos() {
 
       <div class="product-list">
         ${db.produtos
+          .filter((p) => produtoVisivel(p.id))
           .map((p) => {
             const qtd = ui.novaVenda.itens[p.id] || 0;
             const promo = (p.tipo === "trufa" && qtd >= 4) || (p.tipo === "brigadeiro" && qtd >= 2);
